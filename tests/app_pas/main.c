@@ -23,6 +23,7 @@ float test_current_rel = 0.0;
 volatile uint16_t ADC_Value[16] = {0};
 float test_v_in = 50.0;
 float test_speed = 0.0;
+float test_current_in = 0.0;
 mc_configuration test_mcconf;
 
 // Stubs for the rest of the firmware that app_pas.c calls.
@@ -1933,6 +1934,184 @@ static void test_walk_replaces_and_releases(void) {
 	check(after < 0.05, "leaving walk assist does not ramp down from the walk current");
 }
 
+// Config for the power-control tests: a known torque, cadence and full scale.
+static pas_config power_config(void) {
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	c.assist_gain = 1.0;
+	c.cadence_floor_rpm = 0.0;
+	c.power_gain = 2.0;
+	ramp_off(&c);
+	return c;
+}
+
+// Pedal and run the loop, with the measured input power supplied by the caller
+// as a fraction of what the output is actually asking for. 1.0 means the motor
+// delivers exactly the request, which is the case the trim should settle at.
+static float run_power_loop(pas_config *c, float delivered_fraction, int iters) {
+	setup(c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	systime_t t = ticks_for_rpm(60.0);
+
+	// Fill the torque filter and establish cadence.
+	for (int i = 0; i < 20; i++) {
+		cycle_fwd_with_control(t);
+	}
+
+	float out = 0.0;
+	for (int i = 0; i < iters; i++) {
+		// What the motor is drawing, given the output the loop just asked for.
+		test_current_in = out * test_mcconf.lo_current_max * delivered_fraction;
+		out = pas_compute_output(2.0);
+		// Keep the cranks turning so the cadence does not lapse.
+		if ((i % 10) == 0) {
+			cycle_fwd(t);
+		}
+	}
+	return out;
+}
+
+static void test_power_open_loop_default(void) {
+	printf("power open loop\n");
+	pas_config c = power_config();
+	c.power_ctrl_mode = PAS_POWER_OPEN_LOOP;
+	test_v_in = 50.0;
+	test_mcconf.lo_current_max = 100.0;
+
+	// Whatever the motor actually draws, open loop does not react to it.
+	float full = run_power_loop(&c, 1.0, 200);
+	float starved = run_power_loop(&c, 0.3, 200);
+	check_near(starved, full, 0.001, "open loop ignores measured power");
+
+	// And it is the request over the voltage over the current limit.
+	float expect = (app_pas_get_motor_power_target() / 50.0f) / 100.0f;
+	check_near(starved, expect, 0.002, "open loop is the feedforward estimate");
+
+	test_current_in = 0.0;
+}
+
+// Closed loop trims towards the request when the motor is delivering less than
+// asked, which is the case open loop cannot correct.
+static void test_power_closed_loop_trims_up(void) {
+	printf("power closed loop trims up\n");
+	pas_config c = power_config();
+	test_v_in = 50.0;
+	test_mcconf.lo_current_max = 100.0;
+
+	c.power_ctrl_mode = PAS_POWER_OPEN_LOOP;
+	float open = run_power_loop(&c, 0.5, 300);
+
+	c.power_ctrl_mode = PAS_POWER_CLOSED_LOOP;
+	float closed = run_power_loop(&c, 0.5, 300);
+
+	check(closed > open * 1.5f,
+			"closed loop raises the request when the motor delivers less than asked");
+	check(closed <= 1.0, "and stays within the relative current range");
+
+	test_current_in = 0.0;
+}
+
+// And backs off when more is being drawn than asked for.
+static void test_power_closed_loop_trims_down(void) {
+	printf("power closed loop trims down\n");
+	pas_config c = power_config();
+	test_v_in = 50.0;
+	test_mcconf.lo_current_max = 100.0;
+
+	c.power_ctrl_mode = PAS_POWER_OPEN_LOOP;
+	float open = run_power_loop(&c, 1.0, 300);
+
+	c.power_ctrl_mode = PAS_POWER_CLOSED_LOOP;
+	float closed = run_power_loop(&c, 2.0, 300);
+
+	check(closed < open, "closed loop backs off when more power is drawn than asked");
+	check(closed >= 0.0, "and never goes negative");
+
+	test_current_in = 0.0;
+}
+
+// With the motor delivering exactly the request, the trim should settle rather
+// than drift, so closed loop matches open loop in steady state.
+static void test_power_closed_loop_settles(void) {
+	printf("power closed loop settles\n");
+	pas_config c = power_config();
+	test_v_in = 50.0;
+	test_mcconf.lo_current_max = 100.0;
+
+	c.power_ctrl_mode = PAS_POWER_OPEN_LOOP;
+	float open = run_power_loop(&c, 1.0, 400);
+
+	c.power_ctrl_mode = PAS_POWER_CLOSED_LOOP;
+	float closed = run_power_loop(&c, 1.0, 400);
+
+	check_near(closed, open, open * 0.1f,
+			"with the request being delivered, the trim settles near the feedforward");
+}
+
+// The trim must not wind up past the ceiling while the output is clamped.
+static void test_power_closed_loop_antiwindup(void) {
+	printf("power closed loop anti-windup\n");
+	pas_config c = power_config();
+	test_v_in = 50.0;
+	test_mcconf.lo_current_max = 100.0;
+
+	// A tight assist limit, and a motor that never delivers, so the loop is
+	// permanently asking for more and permanently clamped.
+	c.power_ctrl_mode = PAS_POWER_CLOSED_LOOP;
+	c.current_scaling = 0.05;
+	float clamped = run_power_loop(&c, 0.0, 600);
+	check_near(clamped, 0.05, 0.001, "the output stays at the assist limit");
+
+	// Now let the motor deliver. The output must come back promptly rather
+	// than having to unwind a large accumulated correction.
+	for (int i = 0; i < 30; i++) {
+		test_current_in = 10.0 * test_mcconf.lo_current_max;
+		pas_compute_output(2.0);
+	}
+	check(pas_compute_output(2.0) < 0.05,
+			"and comes back down promptly once power is being delivered");
+
+	test_current_in = 0.0;
+}
+
+// In the combined ADC and PAS mode the measured power includes the throttle, so
+// the loop stays open rather than fighting it.
+static void test_power_closed_loop_needs_primary(void) {
+	printf("power closed loop needs primary output\n");
+	pas_config c = power_config();
+	test_v_in = 50.0;
+	test_mcconf.lo_current_max = 100.0;
+	c.power_ctrl_mode = PAS_POWER_CLOSED_LOOP;
+
+	// Primary: the loop closes and trims up on a starved motor.
+	app_pas_start(true);
+	float primary = run_power_loop(&c, 0.5, 300);
+	app_pas_stop();
+
+	// Sharing the output with a throttle: open loop regardless of the setting.
+	app_pas_start(false);
+	float shared = run_power_loop(&c, 0.5, 300);
+	app_pas_stop();
+
+	check(primary > shared * 1.5f,
+			"closed loop only applies when PAS is the only thing driving");
+
+	c.power_ctrl_mode = PAS_POWER_OPEN_LOOP;
+	app_pas_start(false);
+	check_near(run_power_loop(&c, 0.5, 300), shared, 0.001,
+			"and the shared case matches open loop exactly");
+	app_pas_stop();
+
+	test_current_in = 0.0;
+}
+
 int main(void) {
 	memset(&test_appconf, 0, sizeof(test_appconf));
 	memset(&test_mcconf, 0, sizeof(test_mcconf));
@@ -2008,6 +2187,12 @@ int main(void) {
 	test_walk_require_pedal();
 	test_walk_brake_overrides();
 	test_walk_replaces_and_releases();
+	test_power_open_loop_default();
+	test_power_closed_loop_trims_up();
+	test_power_closed_loop_trims_down();
+	test_power_closed_loop_settles();
+	test_power_closed_loop_antiwindup();
+	test_power_closed_loop_needs_primary();
 #endif
 
 	printf("\n%d checks, %d failures\n", checks, failures);

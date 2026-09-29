@@ -9,11 +9,13 @@ extern mc_fault_code test_fault;
 extern float test_current_rel;
 extern float test_v_in;
 extern float test_speed;
+extern float test_current_in;
 extern mc_configuration test_mcconf;
 static inline mc_fault_code mc_interface_get_fault(void) { return test_fault; }
 static inline void mc_interface_set_current_rel(float v) { test_current_rel = v; }
 static inline float mc_interface_get_input_voltage_filtered(void) { return test_v_in; }
 static inline float mc_interface_get_speed(void) { return test_speed; }
+static inline float mc_interface_get_tot_current_in_filtered(void) { return test_current_in; }
 static inline const volatile mc_configuration *mc_interface_get_configuration(void) {
 	return &test_mcconf;
 }

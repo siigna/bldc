@@ -105,6 +105,7 @@ float pas_mix_throttle(float throttle_rel, float pas_rel);
 #define PAS_FLAG_WALK_ACTIVE			(1 << 8)
 #define PAS_FLAG_WALK_CH_INVALID		(1 << 9)
 float app_pas_get_motor_power_target(void);
+float app_pas_get_measured_power(void);
 void app_pas_set_current_sub_scaling(float current_sub_scaling);
 
 // Custom apps

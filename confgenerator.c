@@ -352,6 +352,8 @@ int32_t confgenerator_serialize_appconf(uint8_t *buffer, const app_configuration
 	buffer_append_float16(buffer, conf->app_pas_conf.walk_max_kmh, 10, &ind);
 	buffer_append_float16(buffer, conf->app_pas_conf.walk_current, 1000, &ind);
 	buffer[ind++] = conf->app_pas_conf.walk_require_pedal;
+	buffer[ind++] = conf->app_pas_conf.power_ctrl_mode;
+	buffer_append_float16(buffer, conf->app_pas_conf.power_gain, 100, &ind);
 	buffer[ind++] = conf->imu_conf.type;
 	buffer[ind++] = conf->imu_conf.mode;
 	buffer[ind++] = conf->imu_conf.filter;
@@ -731,6 +733,8 @@ bool confgenerator_deserialize_appconf(const uint8_t *buffer, app_configuration 
 	conf->app_pas_conf.walk_max_kmh = buffer_get_float16(buffer, 10, &ind);
 	conf->app_pas_conf.walk_current = buffer_get_float16(buffer, 1000, &ind);
 	conf->app_pas_conf.walk_require_pedal = buffer[ind++];
+	conf->app_pas_conf.power_ctrl_mode = buffer[ind++];
+	conf->app_pas_conf.power_gain = buffer_get_float16(buffer, 100, &ind);
 	conf->imu_conf.type = buffer[ind++];
 	conf->imu_conf.mode = buffer[ind++];
 	conf->imu_conf.filter = buffer[ind++];
@@ -1094,6 +1098,8 @@ void confgenerator_set_defaults_appconf(app_configuration *conf) {
 	conf->app_pas_conf.walk_max_kmh = APPCONF_PAS_WALK_MAX_KMH;
 	conf->app_pas_conf.walk_current = APPCONF_PAS_WALK_CURRENT;
 	conf->app_pas_conf.walk_require_pedal = APPCONF_PAS_WALK_REQUIRE_PEDAL;
+	conf->app_pas_conf.power_ctrl_mode = APPCONF_PAS_POWER_CTRL_MODE;
+	conf->app_pas_conf.power_gain = APPCONF_PAS_POWER_GAIN;
 	conf->imu_conf.type = APPCONF_IMU_TYPE;
 	conf->imu_conf.mode = APPCONF_IMU_AHRS_MODE;
 	conf->imu_conf.filter = APPCONF_IMU_FILTER;

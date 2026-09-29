@@ -98,6 +98,8 @@ static float torque_filter_v = 0.0;
 static volatile float rider_power_w = 0.0;
 static volatile float assist_basis_w = 0.0;
 static volatile float motor_power_w = 0.0;
+static volatile float measured_power_w = 0.0;
+static float power_integ = 0.0;
 static volatile bool brake_engaged = false;
 static volatile bool brake_ch_invalid = false;
 static volatile float speed_taper = 1.0;
@@ -180,6 +182,8 @@ void app_pas_configure(pas_config *conf) {
 	rider_power_w = 0.0;
 	assist_basis_w = 0.0;
 	motor_power_w = 0.0;
+	measured_power_w = 0.0;
+	power_integ = 0.0;
 	brake_engaged = false;
 	brake_ch_invalid = false;
 	speed_taper = 1.0;
@@ -433,9 +437,30 @@ static float pas_assist_cadence(void) {
 }
 
 /**
- * Convert a motor power request in watts to a relative current.
+ * Convert a motor power request in watts to a relative current, and optionally
+ * trim it against the power actually being drawn.
+ *
+ * Open loop is the request divided by the input voltage, bounded by the current
+ * limits. It cannot overshoot or oscillate, but the delivered power sits below
+ * the request wherever the motor cannot take the current, and nothing corrects
+ * for that.
+ *
+ * Closed loop keeps that as a feedforward term and adds an integral trim on the
+ * error against measured input power. A Cycle Analyst regulates this with a
+ * power PID, and its tuning notes warn about lag from too low a gain and surge
+ * from too high a one. Keeping the feedforward means the gain only has to
+ * correct the residual rather than produce the whole output, so the lag case
+ * does not arise and the gain can be small.
+ *
+ * power_gain is how much of a full scale error the trim closes per second, so
+ * 2.0 closes a full scale error in half a second.
+ *
+ * The loop is only closed when PAS is the primary output. In the combined ADC
+ * and PAS mode the measured input power includes whatever the throttle is
+ * asking for, which is not attributable to this request, so trimming against it
+ * would fight the throttle.
  */
-static float pas_power_to_current_rel(float watts) {
+static float pas_power_to_current_rel(float watts, float ceiling, float dt_ms) {
 	float v_in = mc_interface_get_input_voltage_filtered();
 
 	if (v_in < PAS_MIN_VIN) {
@@ -449,14 +474,40 @@ static float pas_power_to_current_rel(float watts) {
 		return 0.0;
 	}
 
-	// Open loop: the request becomes a current and is then bounded by the
-	// existing current limits, rather than being regulated against measured
-	// power. A Cycle Analyst closes the loop here with a power PID, which is
-	// why its tuning notes discuss surge and lag from the power gain. The trade
-	// is that this cannot overshoot or oscillate, but the delivered power sits
-	// below the request wherever the motor cannot take the current, and nothing
-	// corrects for that.
-	return (watts / v_in) / i_max;
+	const float feedforward = (watts / v_in) / i_max;
+	const float full_scale_w = i_max * v_in;
+
+	measured_power_w = mc_interface_get_tot_current_in_filtered() * v_in;
+
+	if (config.power_ctrl_mode != PAS_POWER_CLOSED_LOOP || !primary_output ||
+			full_scale_w < 1.0 || dt_ms <= 0.0) {
+		power_integ = 0.0;
+		return feedforward;
+	}
+
+	// Nothing to regulate towards, so let the trim go rather than holding a
+	// correction across a pause in pedalling.
+	if (watts < 1.0) {
+		power_integ = 0.0;
+		return feedforward;
+	}
+
+	const float err_rel = (watts - measured_power_w) / full_scale_w;
+	const float step = err_rel * config.power_gain * (dt_ms / 1000.0);
+	float next = power_integ + step;
+
+	// Stop integrating in whichever direction is already against a limit, so
+	// that the trim does not wind up while the output is clamped and then take
+	// time to unwind once it is not.
+	const float total = feedforward + next;
+	if ((total > ceiling && step > 0.0) || (total < 0.0 && step < 0.0)) {
+		next = power_integ;
+	}
+
+	utils_truncate_number(&next, -ceiling, ceiling);
+	power_integ = next;
+
+	return feedforward + power_integ;
 }
 
 /**
@@ -615,9 +666,16 @@ static float pas_walk_output(void) {
  * that it limits every control type rather than only the one that works in
  * watts.
  */
-static float pas_apply_power_cap(float output) {
+/**
+ * The power cap expressed as a relative current, or 1.0 when there is none.
+ *
+ * Shared with the closed loop so that its anti-windup ceiling accounts for the
+ * cap. Otherwise the trim would wind up against a limit applied after it, and
+ * then take time to unwind once the cap was no longer binding.
+ */
+static float pas_power_cap_rel(void) {
 	if (config.power_max_w <= 0.1) {
-		return output;
+		return 1.0;
 	}
 
 	float v_in = mc_interface_get_input_voltage_filtered();
@@ -627,14 +685,17 @@ static float pas_apply_power_cap(float output) {
 	}
 
 	const volatile mc_configuration *mcconf = mc_interface_get_configuration();
-	const float i_max = mcconf->lo_current_max;
-	const float full_scale_w = i_max * v_in;
+	const float full_scale_w = mcconf->lo_current_max * v_in;
 
 	if (full_scale_w < 1.0) {
-		return output;
+		return 1.0;
 	}
 
-	const float max_rel = config.power_max_w / full_scale_w;
+	return config.power_max_w / full_scale_w;
+}
+
+static float pas_apply_power_cap(float output) {
+	const float max_rel = pas_power_cap_rel();
 
 	if (output > max_rel) {
 		return max_rel;
@@ -884,6 +945,18 @@ static void terminal_pas_status(int argc, const char **argv) {
 		commands_printf("Motor power target: %.1f W", (double)motor_power_w);
 		commands_printf("Input voltage     : %.1f V",
 				(double)mc_interface_get_input_voltage_filtered());
+		if (config.power_ctrl_mode == PAS_POWER_CLOSED_LOOP) {
+			commands_printf("Power control     : closed loop, gain %.2f /s",
+				(double)config.power_gain);
+			commands_printf("Measured power    : %.1f W (trim %+.3f)",
+				(double)measured_power_w, (double)power_integ);
+			if (!primary_output) {
+				commands_printf("  Not closed: a throttle shares the output, so measured power");
+				commands_printf("  is not attributable to this request. Running open loop.");
+			}
+		} else {
+			commands_printf("Power control     : open loop");
+		}
 	}
 
 	if (config.torque_avg_pulses > 0) {
@@ -1132,6 +1205,10 @@ float app_pas_get_speed_taper(void) {
 
 float app_pas_get_motor_power_target(void) {
 	return motor_power_w;
+}
+
+float app_pas_get_measured_power(void) {
+	return measured_power_w;
 }
 
 /**
@@ -1459,7 +1536,15 @@ float pas_compute_output(float dt_ms) {
 			}
 			motor_power_w = basis * config.assist_gain;
 
-			output = pas_power_to_current_rel(motor_power_w);
+			// The ceiling the trim must not wind up past is the tighter of the
+			// assist current limit and the power cap, both applied after this.
+			float ceiling = config.current_scaling * sub_scaling;
+			const float cap_rel = pas_power_cap_rel();
+			if (cap_rel < ceiling) {
+				ceiling = cap_rel;
+			}
+
+			output = pas_power_to_current_rel(motor_power_w, ceiling, dt_ms);
 			utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
 		}
 		break;

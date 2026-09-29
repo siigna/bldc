@@ -715,6 +715,15 @@ typedef enum {
 	PAS_TORQUE_ADC_EXT8
 } pas_adc_ch;
 
+// How a PAS power request is turned into a current
+typedef enum {
+	// Compute the current from the request and the input voltage, and let the
+	// current limits bound it
+	PAS_POWER_OPEN_LOOP = 0,
+	// As above, then trim it against measured input power
+	PAS_POWER_CLOSED_LOOP
+} pas_power_ctrl_mode;
+
 // Where the PAS walk assist trigger comes from
 typedef enum {
 	PAS_WALK_SRC_NONE = 0,
@@ -836,6 +845,8 @@ typedef struct {
 	float walk_max_kmh;
 	float walk_current;
 	bool walk_require_pedal;
+	pas_power_ctrl_mode power_ctrl_mode;
+	float power_gain;
 } pas_config;
 
 // NRF Datatypes

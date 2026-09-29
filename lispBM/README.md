@@ -1212,6 +1212,22 @@ Returns the motor power target in watts that the Proportional Power control type
 
 ---
 
+#### app-pas-get-measured-power
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(app-pas-get-measured-power)
+```
+
+Returns the input power in watts the controller is actually drawing, which is what the closed loop power control compares its request against. Only updated while the Proportional Power control type is running.
+
+Note that this can also be computed from the realtime log without any of these extensions, as `v_in` multiplied by `current_in`, both of which are already logged. Plotting that against `pas_assist_watts` is how the power gain is tuned.
+
+---
+
 #### app-pas-get-output
 
 | Platforms | Firmware |
