@@ -86,6 +86,7 @@ float app_pas_get_torque_ratio(void);
 bool app_pas_torque_saturated(void);
 bool app_pas_torque_ch_invalid(void);
 float app_pas_get_rider_power(void);
+float app_pas_get_assist_basis_power(void);
 float app_pas_get_motor_power_target(void);
 void app_pas_set_current_sub_scaling(float current_sub_scaling);
 

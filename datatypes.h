@@ -804,6 +804,9 @@ typedef struct {
 	pas_adc_ch brake_adc_ch;
 	float brake_threshold_v;
 	bool brake_invert;
+	float cadence_floor_rpm;
+	float start_timeout_s;
+	float stop_timeout_s;
 } pas_config;
 
 // NRF Datatypes

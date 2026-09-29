@@ -36,6 +36,10 @@
 	* Optional hard cut when the cranks stop, instead of ramping down over the negative ramp time.
 	* Brake input on a configurable ADC channel with a threshold and optional inversion, which cuts assist immediately. The PAS app had no brake input at all, and in the combined ADC and PAS mode the two outputs are merged by taking the larger, so brake handling on the ADC side did not suppress PAS.
 	* Added the pas_preset terminal command, with a pedelec preset.
+* App PAS pedalling detection and assist cadence, following the Grin Cycle Analyst manuals:
+	* Separate start and stop thresholds for pedalling detection, in seconds. These are tuned in opposite directions, so the single derived period the app used before could not serve both. Zero derives the old value, which for a low pole count sensor is a much longer cutoff than is wanted.
+	* A cadence floor for the assist calculation in Proportional Power, defaulting to 55 rpm. Power is torque times cadence, which collapses as the cranks slow, so without a floor there is the least assist when pulling away from a standstill.
+	* Reported rider power now uses the real cadence while the assist uses the floored one, so telemetry does not overstate what the rider is contributing.
 
 ### 7.00
 #### 2026-05-15

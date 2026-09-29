@@ -42,6 +42,15 @@ below the zero point reads as no torque rather than negative, the deadband and
 its rescaling, the clamp to full scale, saturation reporting, rejection of an
 ADC channel the hardware lacks, and each torque source.
 
+Pedalling detection: that the stop threshold alone controls the cutoff delay and
+the start threshold does not, that a start threshold below the pulse gap never
+establishes a cadence, and that zero derives the old single period including how
+badly that scales at a low pole count.
+
+Assist cadence: that the floor lifts the assist basis in proportion, that
+reported rider power stays on the real cadence, and that the floor does not
+manufacture assist from a stopped crank.
+
 Limits: the speed taper at both ends and half way through, the hard cutoff form,
 the power cap including that it applies to cadence control and tracks the input
 voltage, the hard pedal stop against the ramping behaviour, the brake including

@@ -338,6 +338,9 @@ int32_t confgenerator_serialize_appconf(uint8_t *buffer, const app_configuration
 	buffer[ind++] = conf->app_pas_conf.brake_adc_ch;
 	buffer_append_float16(buffer, conf->app_pas_conf.brake_threshold_v, 100, &ind);
 	buffer[ind++] = conf->app_pas_conf.brake_invert;
+	buffer_append_float16(buffer, conf->app_pas_conf.cadence_floor_rpm, 10, &ind);
+	buffer_append_float16(buffer, conf->app_pas_conf.start_timeout_s, 1000, &ind);
+	buffer_append_float16(buffer, conf->app_pas_conf.stop_timeout_s, 1000, &ind);
 	buffer[ind++] = conf->imu_conf.type;
 	buffer[ind++] = conf->imu_conf.mode;
 	buffer[ind++] = conf->imu_conf.filter;
@@ -703,6 +706,9 @@ bool confgenerator_deserialize_appconf(const uint8_t *buffer, app_configuration 
 	conf->app_pas_conf.brake_adc_ch = buffer[ind++];
 	conf->app_pas_conf.brake_threshold_v = buffer_get_float16(buffer, 100, &ind);
 	conf->app_pas_conf.brake_invert = buffer[ind++];
+	conf->app_pas_conf.cadence_floor_rpm = buffer_get_float16(buffer, 10, &ind);
+	conf->app_pas_conf.start_timeout_s = buffer_get_float16(buffer, 1000, &ind);
+	conf->app_pas_conf.stop_timeout_s = buffer_get_float16(buffer, 1000, &ind);
 	conf->imu_conf.type = buffer[ind++];
 	conf->imu_conf.mode = buffer[ind++];
 	conf->imu_conf.filter = buffer[ind++];
@@ -1052,6 +1058,9 @@ void confgenerator_set_defaults_appconf(app_configuration *conf) {
 	conf->app_pas_conf.brake_adc_ch = APPCONF_PAS_BRAKE_ADC_CH;
 	conf->app_pas_conf.brake_threshold_v = APPCONF_PAS_BRAKE_THRESHOLD_V;
 	conf->app_pas_conf.brake_invert = APPCONF_PAS_BRAKE_INVERT;
+	conf->app_pas_conf.cadence_floor_rpm = APPCONF_PAS_CADENCE_FLOOR_RPM;
+	conf->app_pas_conf.start_timeout_s = APPCONF_PAS_START_TIMEOUT_S;
+	conf->app_pas_conf.stop_timeout_s = APPCONF_PAS_STOP_TIMEOUT_S;
 	conf->imu_conf.type = APPCONF_IMU_TYPE;
 	conf->imu_conf.mode = APPCONF_IMU_AHRS_MODE;
 	conf->imu_conf.filter = APPCONF_IMU_FILTER;

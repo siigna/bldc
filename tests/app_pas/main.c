@@ -192,6 +192,10 @@ static pas_config base_config(void) {
 	memset(&c, 0, sizeof(c));
 	c.assist_gain = 1.0;
 	c.torque_avg_pulses = 0;
+	// The shipped defaults, so the tests run against realistic values.
+	c.cadence_floor_rpm = 55.0;
+	c.start_timeout_s = 0.3;
+	c.stop_timeout_s = 0.25;
 	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
 	c.sensor_type = PAS_SENSOR_TYPE_QUADRATURE;
 	c.current_scaling = 0.5;
@@ -1410,6 +1414,196 @@ static void test_pedelec_combination(void) {
 	test_speed = 0.0;
 }
 
+// Torque times cadence collapses as the cranks slow, so the assist calculation
+// floors the cadence. Reported rider power must still use the real one.
+static void test_cadence_floor(void) {
+	printf("cadence floor\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	c.assist_gain = 1.0;
+	c.cadence_floor_rpm = 55.0;
+
+	// Pedal well below the floor.
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	systime_t t = ticks_for_rpm(25.0);
+	for (int i = 0; i < 40; i++) {
+		cycle_fwd_with_control(t);
+	}
+
+	float rider = app_pas_get_rider_power();
+	float basis = app_pas_get_assist_basis_power();
+
+	check_near(app_pas_get_pedal_rpm(), 25.0, 1.0, "pedalling at 25 rpm");
+	check(basis > rider * 1.5f, "the assist basis is lifted by the floor");
+	check_near(basis / rider, 55.0f / 25.0f, 0.1,
+			"the assist basis is scaled by the ratio of the floor to the cadence");
+	check_near(app_pas_get_motor_power_target(), basis * c.assist_gain, 1.0,
+			"motor power comes from the floored basis");
+
+	// Above the floor the two agree.
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	t = ticks_for_rpm(80.0);
+	for (int i = 0; i < 40; i++) {
+		cycle_fwd_with_control(t);
+	}
+	check_near(app_pas_get_assist_basis_power(), app_pas_get_rider_power(), 1.0,
+			"above the floor the basis is the rider power");
+}
+
+static void test_cadence_floor_off(void) {
+	printf("cadence floor off\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	c.cadence_floor_rpm = 0.0;
+	setup(&c);
+
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	systime_t t = ticks_for_rpm(25.0);
+	for (int i = 0; i < 40; i++) {
+		cycle_fwd_with_control(t);
+	}
+	check_near(app_pas_get_assist_basis_power(), app_pas_get_rider_power(), 0.5,
+			"with no floor the basis is the rider power");
+}
+
+// The floor must not create assist out of a stopped crank, which would undo the
+// property that makes the power type safe against a stuck torque sensor.
+static void test_cadence_floor_not_applied_when_stopped(void) {
+	printf("cadence floor when stopped\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	c.cadence_floor_rpm = 55.0;
+	setup(&c);
+
+	// Standing on the pedals, cranks still.
+	set_adc_volts(ADC_IND_EXT, 2.0);
+	for (int i = 0; i < 100; i++) {
+		test_now += 100;
+		pas_event_handler();
+		pas_compute_output(10.0);
+	}
+
+	check(app_pas_get_torque_nm() > 10.0, "torque is being read");
+	check_near(app_pas_get_assist_basis_power(), 0.0, 0.001,
+			"no assist basis from a stopped crank even with a floor set");
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "and no assist");
+}
+
+// pedal() returns two transitions after the pulse that was last accepted, since
+// a pulse is accepted on arriving at state 3 and a cycle is four transitions.
+// The measurement below therefore starts half a pulse interval into the stop
+// window, and the interval is set by ticks_for_rpm, not by config.magnets.
+#define CUTOFF_MEASURE_OFFSET_S		(0.5f * 60.0f / (50.0f * (float)MAGNETS))
+
+// Time from the start of the measurement to the cadence being reported as zero.
+static float time_to_cutoff(pas_config *c) {
+	setup(c);
+	pedal(50.0, 16);
+
+	for (int i = 0; i < 2000; i++) {
+		test_now += 10;			// 1 ms
+		pas_event_handler();
+		if (app_pas_get_pedal_rpm() < 0.001) {
+			return (float)(i + 1) * 0.001f;
+		}
+	}
+	return -1.0;
+}
+
+// The stop threshold is what controls how long assist lingers, and it has to be
+// independent of the start threshold because the two are tuned oppositely.
+static void test_stop_threshold(void) {
+	printf("stop threshold\n");
+	pas_config c = base_config();
+	c.magnets = 18;			// as on the sensor this was written against
+
+	c.start_timeout_s = 0.4;
+	c.stop_timeout_s = 0.15;
+	float quick = time_to_cutoff(&c);
+	check_near(quick, 0.15 - CUTOFF_MEASURE_OFFSET_S, 0.01,
+			"a short stop threshold cuts off quickly");
+
+	c.stop_timeout_s = 0.5;
+	float slow = time_to_cutoff(&c);
+	check_near(slow, 0.5 - CUTOFF_MEASURE_OFFSET_S, 0.01,
+			"a long stop threshold lingers");
+
+	check(slow > quick * 2.0f, "the stop threshold controls the cutoff delay");
+
+	// And changing the start threshold does not move the cutoff.
+	c.stop_timeout_s = 0.15;
+	c.start_timeout_s = 1.0;
+	check_near(time_to_cutoff(&c), quick, 0.005,
+			"the start threshold does not affect the cutoff");
+}
+
+// Zero means derive from the start cadence and magnet count, which is what the
+// app did when one value served both roles.
+static void test_thresholds_derived(void) {
+	printf("thresholds derived\n");
+	pas_config c = base_config();
+	c.magnets = 18;
+	c.pedal_rpm_start = 10.0;
+	c.start_timeout_s = 0.0;
+	c.stop_timeout_s = 0.0;
+
+	// 60 / 10 / 18 * 1.2 = 0.4 s, which is above the 0.15 to 0.30 s Grin
+	// recommend, and is the reason for making it explicit.
+	check_near(time_to_cutoff(&c), 0.4 - CUTOFF_MEASURE_OFFSET_S, 0.01,
+			"the derived cutoff is the legacy value");
+
+	// A low pole count sensor gets a much longer cutoff from the same formula.
+	c.magnets = 8;
+	check_near(time_to_cutoff(&c), 0.9 - CUTOFF_MEASURE_OFFSET_S, 0.01,
+			"the derived cutoff scales with the magnet count");
+}
+
+// The start threshold gates whether a gap counts as continued pedalling.
+static void test_start_threshold(void) {
+	printf("start threshold\n");
+	pas_config c = base_config();
+	c.stop_timeout_s = 1.0;			// out of the way
+
+	// At 50 rpm with 24 magnets the gap between pulses is 50 ms. A start
+	// threshold below that means no gap ever counts as continued pedalling, so
+	// every pulse is only a reference and no cadence is established.
+	c.start_timeout_s = 0.02;
+	setup(&c);
+	pedal(50.0, 20);
+	check_near(app_pas_get_pedal_rpm(), 0.0, 0.001,
+			"a start threshold below the pulse gap never establishes a cadence");
+
+	// Above the gap it works normally.
+	c.start_timeout_s = 0.3;
+	setup(&c);
+	pedal(50.0, 20);
+	check_near(app_pas_get_pedal_rpm(), 50.0, 0.5,
+			"a start threshold above the pulse gap decodes normally");
+}
+
 int main(void) {
 	memset(&test_appconf, 0, sizeof(test_appconf));
 	memset(&test_mcconf, 0, sizeof(test_mcconf));
@@ -1469,6 +1663,12 @@ int main(void) {
 	test_brake_inverted();
 	test_brake_channel_validation();
 	test_pedelec_combination();
+	test_cadence_floor();
+	test_cadence_floor_off();
+	test_cadence_floor_not_applied_when_stopped();
+	test_stop_threshold();
+	test_thresholds_derived();
+	test_start_threshold();
 #endif
 
 	printf("\n%d checks, %d failures\n", checks, failures);

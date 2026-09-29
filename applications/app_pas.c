@@ -61,7 +61,13 @@ static volatile pas_config config;
 static volatile float sub_scaling = 1.0;
 static volatile float output_current_rel = 0.0;
 static volatile float ms_without_power = 0.0;
-static volatile float max_pulse_period = 0.0;
+// The longest gap between pulses that still counts as continued pedalling, and
+// the gap after which the cranks are considered stopped. These are tuned in
+// opposite directions, which is why one value cannot serve both: a longer start
+// makes pulling away from a standstill engage sooner, while a shorter stop makes
+// assist end sooner once pedalling ceases.
+static volatile float start_period = 0.0;
+static volatile float stop_period = 0.0;
 static volatile float min_pedal_period = 0.0;
 static volatile float direction_conf = 0.0;
 static volatile float pedal_rpm = 0;
@@ -77,7 +83,11 @@ static volatile bool torque_saturated = false;
 static volatile bool torque_ch_invalid = false;
 static volatile bool torque_src_unsupported = false;
 static float torque_filter_v = 0.0;
+// Reported rider power, from the actual cadence. Kept separate from the value
+// the assist is computed from, which uses a floored cadence, so that telemetry
+// does not overstate what the rider is contributing.
 static volatile float rider_power_w = 0.0;
+static volatile float assist_basis_w = 0.0;
 static volatile float motor_power_w = 0.0;
 static volatile bool brake_engaged = false;
 static volatile bool brake_ch_invalid = false;
@@ -102,7 +112,7 @@ static uint8_t dec_old_state = 0;
 static systime_t dec_last_pulse_time = 0;
 // Whether dec_last_pulse_time refers to a real pulse yet. Without this the age
 // of the first pulse would be measured from tick zero, which only looks correct
-// because uptime is normally already larger than max_pulse_period.
+// because uptime is normally already larger than the start period.
 static bool dec_have_reference = false;
 static float dec_period_filtered = 0.0;
 // Incremented on every accepted pedal pulse, so that the output side can tell
@@ -154,6 +164,7 @@ void app_pas_configure(pas_config *conf) {
 	torque_src_unsupported = false;
 
 	rider_power_w = 0.0;
+	assist_basis_w = 0.0;
 	motor_power_w = 0.0;
 	brake_engaged = false;
 	brake_ch_invalid = false;
@@ -165,8 +176,16 @@ void app_pas_configure(pas_config *conf) {
 	torque_avg_nm = 0.0;
 	torque_pulse_seen = dec_pulse_count;
 
-	// a period longer than this should immediately reduce power to zero
-	max_pulse_period = 1.0 / ((config.pedal_rpm_start / 60.0) * config.magnets) * 1.2;
+	// Zero means derive from the start cadence and magnet count, which is what
+	// this app did when it had a single period for both roles. Note that the
+	// derivation scales with the magnet count, so a low pole count sensor gets a
+	// long cutoff: eight magnets at a 10 rpm start gives 0.9 s, well beyond the
+	// 0.15 to 0.30 s that Grin recommend for the stop threshold on a Cycle
+	// Analyst. Setting the two explicitly is preferable.
+	const float derived = 1.0 / ((config.pedal_rpm_start / 60.0) * config.magnets) * 1.2;
+
+	start_period = config.start_timeout_s > 0.001 ? config.start_timeout_s : derived;
+	stop_period = config.stop_timeout_s > 0.001 ? config.stop_timeout_s : derived;
 
 	// if pedal spins at x3 the end rpm, assume its beyond limits
 	min_pedal_period = 1.0 / ((config.pedal_rpm_end * 3.0 / 60.0));
@@ -361,15 +380,33 @@ static float pas_torque_for_control(float instant_nm) {
 }
 
 /**
- * Rider power in watts, from crank torque and cadence.
- *
- * This is the concept the app was missing. Note that it needs no separate
- * no-cadence interlock: with the cranks stopped the angular velocity is zero,
- * so the power is zero whatever the torque sensor reads.
+ * Power in watts from a crank torque and a cadence in rpm.
  */
-static float pas_rider_power_w(float nm) {
-	const float rad_per_s = pedal_rpm * (2.0 * M_PI / 60.0);
-	return nm * rad_per_s;
+static float pas_power_w(float nm, float rpm) {
+	return nm * (rpm * (2.0 * M_PI / 60.0));
+}
+
+/**
+ * The cadence the assist calculation should use.
+ *
+ * Torque times cadence collapses towards zero as the cranks slow, so pulling
+ * away from a standstill would get the least assist just where the most is
+ * wanted. A floor under the cadence used for the calculation fixes that, and a
+ * Cycle Analyst uses 55 rpm for the same reason.
+ *
+ * The floor only applies while the cranks are actually turning, so the property
+ * that stopped cranks mean no assist still holds and still needs no separate
+ * interlock for a torque sensor stuck at a non-zero reading.
+ */
+static float pas_assist_cadence(void) {
+	if (pedal_rpm < 0.01) {
+		return 0.0;
+	}
+
+	if (pedal_rpm < config.cadence_floor_rpm) {
+		return config.cadence_floor_rpm;
+	}
+	return pedal_rpm;
 }
 
 /**
@@ -655,7 +692,14 @@ static void terminal_pas_status(int argc, const char **argv) {
 	commands_printf("Output (rel)      : %.3f", (double)out_ramp);
 	commands_printf("Filter            : %s", config.use_filter ? "on" : "off");
 	commands_printf("Pedal period      : %.4f s", (double)dec_period_filtered);
-	commands_printf("Max pulse period  : %.4f s", (double)max_pulse_period);
+	commands_printf("Start period      : %.3f s%s", (double)start_period,
+			config.start_timeout_s > 0.001 ? "" : " (derived)");
+	commands_printf("Stop period       : %.3f s%s", (double)stop_period,
+			config.stop_timeout_s > 0.001 ? "" : " (derived)");
+	if (stop_period > 0.35) {
+		commands_printf("  The stop period is long, so assist will linger after the cranks");
+		commands_printf("  stop. Grin suggest 0.15 to 0.30 s on a Cycle Analyst.");
+	}
 	commands_printf("Min pedal period  : %.4f s", (double)min_pedal_period);
 
 #ifdef HW_PAS1_PORT
@@ -707,7 +751,14 @@ static void terminal_pas_status(int argc, const char **argv) {
 	if (config.ctrl_type == PAS_CTRL_TYPE_POWER) {
 		commands_printf("Assist gain       : %.2f motor W per rider W",
 				(double)config.assist_gain);
-		commands_printf("Rider power       : %.1f W", (double)rider_power_w);
+		commands_printf("Rider power       : %.1f W (actual cadence)", (double)rider_power_w);
+		if (config.cadence_floor_rpm > 0.01) {
+			commands_printf("Assist basis      : %.1f W (cadence floored at %.0f rpm)",
+				(double)assist_basis_w, (double)config.cadence_floor_rpm);
+		} else {
+			commands_printf("Assist basis      : %.1f W (no cadence floor)",
+				(double)assist_basis_w);
+		}
 		commands_printf("Motor power target: %.1f W", (double)motor_power_w);
 		commands_printf("Input voltage     : %.1f V",
 				(double)mc_interface_get_input_voltage_filtered());
@@ -869,6 +920,10 @@ float app_pas_get_rider_power(void) {
 	return rider_power_w;
 }
 
+float app_pas_get_assist_basis_power(void) {
+	return assist_basis_w;
+}
+
 float app_pas_get_motor_power_target(void) {
 	return motor_power_w;
 }
@@ -877,7 +932,7 @@ float app_pas_get_motor_power_target(void) {
  * Decode a quadrature (two-wire) pedal sensor.
  *
  * Called at the app update rate. Updates pedal_rpm, or sets it to zero when the
- * cranks have been still for longer than max_pulse_period.
+ * cranks have been still for longer than the stop period.
  */
 static void pas_decode_quadrature(void) {
 #ifdef HW_PAS1_PORT
@@ -911,9 +966,10 @@ static void pas_decode_quadrature(void) {
 
 		// The first pulse after a start, and the first after an idle period, has no
 		// meaningful period, so use it only as the reference for the next one. The
-		// idle test is against max_pulse_period, which is a single magnet period, so
-		// it uses the age rather than the full revolution period computed below.
-		if (!dec_have_reference || pulse_age > max_pulse_period) {
+		// gap is compared against the start period, which is a gap between single
+		// pulses, so the age is used here rather than the full revolution period
+		// computed below.
+		if (!dec_have_reference || pulse_age > start_period) {
 			dec_have_reference = true;
 			dec_period_filtered = 0.0;
 			return;
@@ -940,7 +996,7 @@ static void pas_decode_quadrature(void) {
 		dec_pulse_count++;
 	} else {
 		// If no pedal activity, set RPM as zero
-		if (UTILS_AGE_S(dec_last_pulse_time) > max_pulse_period) {
+		if (UTILS_AGE_S(dec_last_pulse_time) > stop_period) {
 			pedal_rpm = 0.0;
 			dec_period_filtered = 0.0;
 		}
@@ -968,7 +1024,7 @@ static void pas_decode_single_wire(void) {
 
 		// As for quadrature, the first pulse after a start or after an idle
 		// period is only a reference for the next one.
-		if (!dec_have_reference || pulse_age > max_pulse_period) {
+		if (!dec_have_reference || pulse_age > start_period) {
 			dec_have_reference = true;
 			dec_period_filtered = 0.0;
 			return;
@@ -991,7 +1047,7 @@ static void pas_decode_single_wire(void) {
 		dec_pulse_count++;
 	} else {
 		// If no pedal activity, set RPM as zero
-		if (UTILS_AGE_S(dec_last_pulse_time) > max_pulse_period) {
+		if (UTILS_AGE_S(dec_last_pulse_time) > stop_period) {
 			pedal_rpm = 0.0;
 			dec_period_filtered = 0.0;
 		}
@@ -1112,8 +1168,12 @@ float pas_compute_output(float dt_ms) {
 			torque_nm = pas_read_torque_nm();
 			pas_torque_track(torque_nm);
 
-			rider_power_w = pas_rider_power_w(pas_torque_for_control(torque_nm));
-			motor_power_w = rider_power_w * config.assist_gain;
+			const float control_nm = pas_torque_for_control(torque_nm);
+
+			// Reported from the real cadence, assisted from the floored one.
+			rider_power_w = pas_power_w(control_nm, pedal_rpm);
+			assist_basis_w = pas_power_w(control_nm, pas_assist_cadence());
+			motor_power_w = assist_basis_w * config.assist_gain;
 
 			output = pas_power_to_current_rel(motor_power_w);
 			utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
