@@ -686,7 +686,8 @@ typedef enum {
 	PAS_CTRL_TYPE_NONE = 0,
 	PAS_CTRL_TYPE_CADENCE,
 	PAS_CTRL_TYPE_TORQUE,
-	PAS_CTRL_TYPE_TORQUE_WITH_CADENCE_TIMEOUT
+	PAS_CTRL_TYPE_TORQUE_WITH_CADENCE_TIMEOUT,
+	PAS_CTRL_TYPE_POWER
 } pas_control_type;
 
 // PAS cadence sensor types
@@ -787,6 +788,8 @@ typedef struct {
 	float torque_nm_per_v;
 	float torque_max_nm;
 	float torque_deadband_nm;
+	float assist_gain;
+	uint16_t torque_avg_pulses;
 } pas_config;
 
 // NRF Datatypes

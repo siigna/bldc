@@ -41,6 +41,15 @@
 #define MIN_MS_WITHOUT_POWER			500
 #define FILTER_SAMPLES					5
 
+// One entry per pedal pulse, so that the averaging window can cover a whole
+// crank revolution at the largest magnet count the configuration allows.
+#define PAS_TORQUE_RING_MAX				128
+
+// A measured input voltage that reads low inflates the current a power request
+// converts to, so it is floored here. Reading high is harmless, since it can
+// only ask for less current than intended.
+#define PAS_MIN_VIN						8.0
+
 // Threads
 static THD_FUNCTION(pas_thread, arg);
 __attribute__((section(".ram4"))) static THD_WORKING_AREA(pas_thread_wa, 512);
@@ -66,6 +75,21 @@ static volatile bool torque_saturated = false;
 static volatile bool torque_ch_invalid = false;
 static volatile bool torque_src_unsupported = false;
 static float torque_filter_v = 0.0;
+static volatile float rider_power_w = 0.0;
+static volatile float motor_power_w = 0.0;
+
+// Revolution synchronous torque averaging. A bottom bracket torque signal
+// varies strongly within a pedal stroke, so the mean over one pulse interval is
+// stored per pulse and the window averages whole intervals rather than applying
+// a blind time constant. Setting the window to the magnet count makes it
+// exactly one crank revolution.
+static float torque_ring[PAS_TORQUE_RING_MAX];
+static uint8_t torque_ring_pos = 0;
+static uint8_t torque_ring_fill = 0;
+static float torque_pulse_sum = 0.0;
+static uint32_t torque_pulse_samples = 0;
+static float torque_avg_nm = 0.0;
+static uint32_t torque_pulse_seen = 0;
 
 // Pedal decoder state. Kept at file scope so that it can be reset when the
 // app is reconfigured or restarted, which function-local statics cannot be.
@@ -76,6 +100,9 @@ static systime_t dec_last_pulse_time = 0;
 // because uptime is normally already larger than max_pulse_period.
 static bool dec_have_reference = false;
 static float dec_period_filtered = 0.0;
+// Incremented on every accepted pedal pulse, so that the output side can tell
+// when a pulse interval has closed without duplicating the edge detection.
+static volatile uint32_t dec_pulse_count = 0;
 static int32_t dec_correct_direction_counter = 0;
 
 // Output state. Also kept at file scope so that a stop/start or a settings write
@@ -120,6 +147,15 @@ void app_pas_configure(pas_config *conf) {
 	torque_saturated = false;
 	torque_ch_invalid = false;
 	torque_src_unsupported = false;
+
+	rider_power_w = 0.0;
+	motor_power_w = 0.0;
+	torque_ring_pos = 0;
+	torque_ring_fill = 0;
+	torque_pulse_sum = 0.0;
+	torque_pulse_samples = 0;
+	torque_avg_nm = 0.0;
+	torque_pulse_seen = dec_pulse_count;
 
 	// a period longer than this should immediately reduce power to zero
 	max_pulse_period = 1.0 / ((config.pedal_rpm_start / 60.0) * config.magnets) * 1.2;
@@ -232,6 +268,120 @@ float pas_read_torque_nm(void) {
 		default:
 			return 0.0;
 	}
+}
+
+/**
+ * Feed a torque sample into the revolution synchronous average.
+ *
+ * Samples are accumulated between pedal pulses, and the mean of each pulse
+ * interval is stored when that interval closes. Averaging whole intervals means
+ * the window is tied to crank position rather than to time, so it does not
+ * change character with cadence the way a fixed time constant does.
+ */
+static void pas_torque_track(float nm) {
+	// With the cranks stopped the window would hold torque from before the stop
+	// and pair it with a fresh cadence on resume, so it is discarded and refills
+	// from the new pedalling.
+	if (pedal_rpm < 0.01) {
+		torque_ring_pos = 0;
+		torque_ring_fill = 0;
+		torque_pulse_sum = 0.0;
+		torque_pulse_samples = 0;
+		torque_avg_nm = 0.0;
+		torque_pulse_seen = dec_pulse_count;
+
+		// The low pass on the sensor voltage is stale for the same reason, and
+		// letting it decay across the stop would assist the first pulses of the
+		// next start from the previous load. Starting it from zero instead only
+		// ever under-reads while it fills.
+		torque_filter_v = 0.0;
+		return;
+	}
+
+	torque_pulse_sum += nm;
+	torque_pulse_samples++;
+
+	if (dec_pulse_count == torque_pulse_seen) {
+		return;
+	}
+	torque_pulse_seen = dec_pulse_count;
+
+	if (torque_pulse_samples > 0) {
+		torque_ring[torque_ring_pos] = torque_pulse_sum / (float)torque_pulse_samples;
+		torque_ring_pos = (torque_ring_pos + 1) % PAS_TORQUE_RING_MAX;
+		if (torque_ring_fill < PAS_TORQUE_RING_MAX) {
+			torque_ring_fill++;
+		}
+	}
+	torque_pulse_sum = 0.0;
+	torque_pulse_samples = 0;
+
+	// Recomputed only when an interval closes rather than every iteration.
+	int window = config.torque_avg_pulses;
+	if (window > PAS_TORQUE_RING_MAX) {
+		window = PAS_TORQUE_RING_MAX;
+	}
+	if (window > torque_ring_fill) {
+		window = torque_ring_fill;
+	}
+
+	if (window <= 0) {
+		torque_avg_nm = 0.0;
+		return;
+	}
+
+	float sum = 0.0;
+	for (int i = 0; i < window; i++) {
+		int idx = (int)torque_ring_pos - 1 - i;
+		while (idx < 0) {
+			idx += PAS_TORQUE_RING_MAX;
+		}
+		sum += torque_ring[idx];
+	}
+	torque_avg_nm = sum / (float)window;
+}
+
+/**
+ * The torque the assist law should act on, which is the averaged value when a
+ * window is configured and the instantaneous one otherwise.
+ */
+static float pas_torque_for_control(float instant_nm) {
+	if (config.torque_avg_pulses > 0 && torque_ring_fill > 0) {
+		return torque_avg_nm;
+	}
+	return instant_nm;
+}
+
+/**
+ * Rider power in watts, from crank torque and cadence.
+ *
+ * This is the concept the app was missing. Note that it needs no separate
+ * no-cadence interlock: with the cranks stopped the angular velocity is zero,
+ * so the power is zero whatever the torque sensor reads.
+ */
+static float pas_rider_power_w(float nm) {
+	const float rad_per_s = pedal_rpm * (2.0 * M_PI / 60.0);
+	return nm * rad_per_s;
+}
+
+/**
+ * Convert a motor power request in watts to a relative current.
+ */
+static float pas_power_to_current_rel(float watts) {
+	float v_in = mc_interface_get_input_voltage_filtered();
+
+	if (v_in < PAS_MIN_VIN) {
+		v_in = PAS_MIN_VIN;
+	}
+
+	const volatile mc_configuration *mcconf = mc_interface_get_configuration();
+	const float i_max = mcconf->lo_current_max;
+
+	if (i_max < 0.01) {
+		return 0.0;
+	}
+
+	return (watts / v_in) / i_max;
 }
 
 /**
@@ -389,6 +539,28 @@ static void terminal_pas_status(int argc, const char **argv) {
 		commands_printf("  there is no assist. Set the torque source.");
 	}
 
+	if (config.ctrl_type == PAS_CTRL_TYPE_POWER) {
+		commands_printf("Assist gain       : %.2f motor W per rider W",
+				(double)config.assist_gain);
+		commands_printf("Rider power       : %.1f W", (double)rider_power_w);
+		commands_printf("Motor power target: %.1f W", (double)motor_power_w);
+		commands_printf("Input voltage     : %.1f V",
+				(double)mc_interface_get_input_voltage_filtered());
+	}
+
+	if (config.torque_avg_pulses > 0) {
+		commands_printf("Torque averaging  : %d pulses (%d filled), %.2f Nm",
+				(int)config.torque_avg_pulses, (int)torque_ring_fill,
+				(double)torque_avg_nm);
+		if (config.torque_avg_pulses != config.magnets) {
+			commands_printf("  Note: set this to the magnet count (%d) for exactly one",
+					(int)config.magnets);
+			commands_printf("  crank revolution.");
+		}
+	} else {
+		commands_printf("Torque averaging  : off");
+	}
+
 	if (sensor_type_unsupported) {
 		commands_printf("WARNING: sensor type %d is not supported, no cadence is decoded.",
 				(int)config.sensor_type);
@@ -483,6 +655,14 @@ bool app_pas_torque_ch_invalid(void) {
 	return torque_ch_invalid;
 }
 
+float app_pas_get_rider_power(void) {
+	return rider_power_w;
+}
+
+float app_pas_get_motor_power_target(void) {
+	return motor_power_w;
+}
+
 /**
  * Decode a quadrature (two-wire) pedal sensor.
  *
@@ -547,6 +727,7 @@ static void pas_decode_quadrature(void) {
 		// forwards, so the result is positive. Scaling by direction_qem here would
 		// double the reported cadence whenever QEM returned 2.
 		pedal_rpm = 60.0 / dec_period_filtered;
+		dec_pulse_count++;
 	} else {
 		// If no pedal activity, set RPM as zero
 		if (UTILS_AGE_S(dec_last_pulse_time) > max_pulse_period) {
@@ -597,6 +778,7 @@ static void pas_decode_single_wire(void) {
 		}
 
 		pedal_rpm = 60.0 / dec_period_filtered;
+		dec_pulse_count++;
 	} else {
 		// If no pedal activity, set RPM as zero
 		if (UTILS_AGE_S(dec_last_pulse_time) > max_pulse_period) {
@@ -634,6 +816,106 @@ void pas_event_handler(void) {
 	}
 }
 
+/**
+ * Compute the relative current output for the configured control type.
+ *
+ * Separated from the thread so that the assist law is reachable without one,
+ * and so that the thread is left holding only the loop and the safety
+ * interlocks. dt_ms is the interval since the previous call.
+ */
+float pas_compute_output(float dt_ms) {
+	float output = 0.0;
+
+	switch (config.ctrl_type) {
+		case PAS_CTRL_TYPE_NONE:
+			output = 0.0;
+			break;
+		case PAS_CTRL_TYPE_CADENCE:
+			// Map pedal rpm to assist level
+
+			// NOTE: If the limits are the same a numerical instability is approached, so in that case
+			// just use on/off control (which is what setting the limits to the same value essentially means).
+			if (config.pedal_rpm_end > (config.pedal_rpm_start + 1.0)) {
+				output = utils_map(pedal_rpm, config.pedal_rpm_start, config.pedal_rpm_end, 0.0, config.current_scaling * sub_scaling);
+				utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
+			} else {
+				if (pedal_rpm > config.pedal_rpm_end) {
+					output = config.current_scaling * sub_scaling;
+				} else {
+					output = 0.0;
+				}
+			}
+			break;
+
+		case PAS_CTRL_TYPE_TORQUE:
+		case PAS_CTRL_TYPE_TORQUE_WITH_CADENCE_TIMEOUT:
+		{
+			// Both torque types sample the sensor. Previously only the first case
+			// did, and the second relied on falling into it, so selecting the
+			// second one directly never computed an output at all.
+			//
+			// The reading comes from whichever source is configured, so this is
+			// no longer restricted to boards that implement hw_get_PAS_torque().
+			torque_nm = pas_read_torque_nm();
+			pas_torque_track(torque_nm);
+
+			float ratio = config.torque_max_nm > 0.01 ?
+					torque_nm / config.torque_max_nm : 0.0;
+			utils_truncate_number(&ratio, 0.0, 1.0);
+			torque_ratio = ratio;
+
+			output = ratio * config.current_scaling * sub_scaling;
+			utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
+
+			// The cadence checks below are applied to both types. They were added
+			// as a safety fix and reached the plain torque type through the
+			// fall-through, so they are kept there rather than dropped.
+
+			// disable assistance if torque has been sensed for >5sec without any pedal movement. Prevents
+			// motor overtemps when the rider is just resting on the pedals
+			if(output == 0.0 || pedal_rpm > 0) {
+				out_ms_without_cadence_or_torque = 0.0;
+			} else {
+				out_ms_without_cadence_or_torque += dt_ms;
+				if(out_ms_without_cadence_or_torque > MAX_MS_WITHOUT_CADENCE_OR_TORQUE) {
+					output = 0.0;
+				}
+			}
+			// if cranks are not moving, there should not be any output. This covers the case of a torque sensor
+			// stuck with a non-zero signal.
+			if(pedal_rpm < 0.01) {
+				out_ms_without_cadence += dt_ms;
+				if(out_ms_without_cadence > MAX_MS_WITHOUT_CADENCE) {
+					output = 0.0;
+				}
+			} else {
+				out_ms_without_cadence = 0.0;
+			}
+		}
+		break;
+
+		case PAS_CTRL_TYPE_POWER:
+		{
+			// Motor power proportional to rider power. Rider power is zero
+			// whenever the cranks are stopped, so this needs no separate
+			// interlock for a torque sensor stuck at a non-zero reading.
+			torque_nm = pas_read_torque_nm();
+			pas_torque_track(torque_nm);
+
+			rider_power_w = pas_rider_power_w(pas_torque_for_control(torque_nm));
+			motor_power_w = rider_power_w * config.assist_gain;
+
+			output = pas_power_to_current_rel(motor_power_w);
+			utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
+		}
+		break;
+
+		default:
+			break;
+	}
+	return output;
+}
+
 static THD_FUNCTION(pas_thread, arg) {
 	(void)arg;
 
@@ -658,10 +940,11 @@ static THD_FUNCTION(pas_thread, arg) {
 
 		pas_event_handler();	// this could happen inside an ISR instead of being polled
 
-		// Declared per iteration: a control type that computes no output, or an
+		// Recomputed every iteration: a control type that produces nothing, or an
 		// iteration that bails out early, must not leave a previous value latched
 		// to be ramped and applied.
 		float output = 0.0;
+
 
 		// For safe start when fault codes occur
 		if (mc_interface_get_fault() != FAULT_CODE_NONE) {
@@ -677,76 +960,7 @@ static THD_FUNCTION(pas_thread, arg) {
 			continue;
 		}
 
-		switch (config.ctrl_type) {
-			case PAS_CTRL_TYPE_NONE:
-				output = 0.0;
-				break;
-			case PAS_CTRL_TYPE_CADENCE:
-				// Map pedal rpm to assist level
-
-				// NOTE: If the limits are the same a numerical instability is approached, so in that case
-				// just use on/off control (which is what setting the limits to the same value essentially means).
-				if (config.pedal_rpm_end > (config.pedal_rpm_start + 1.0)) {
-					output = utils_map(pedal_rpm, config.pedal_rpm_start, config.pedal_rpm_end, 0.0, config.current_scaling * sub_scaling);
-					utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
-				} else {
-					if (pedal_rpm > config.pedal_rpm_end) {
-						output = config.current_scaling * sub_scaling;
-					} else {
-						output = 0.0;
-					}
-				}
-				break;
-
-			case PAS_CTRL_TYPE_TORQUE:
-			case PAS_CTRL_TYPE_TORQUE_WITH_CADENCE_TIMEOUT:
-			{
-				// Both torque types sample the sensor. Previously only the first case
-				// did, and the second relied on falling into it, so selecting the
-				// second one directly never computed an output at all.
-				//
-				// The reading comes from whichever source is configured, so this is
-				// no longer restricted to boards that implement hw_get_PAS_torque().
-				torque_nm = pas_read_torque_nm();
-
-				float ratio = config.torque_max_nm > 0.01 ?
-						torque_nm / config.torque_max_nm : 0.0;
-				utils_truncate_number(&ratio, 0.0, 1.0);
-				torque_ratio = ratio;
-
-				output = ratio * config.current_scaling * sub_scaling;
-				utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
-
-				// The cadence checks below are applied to both types. They were added
-				// as a safety fix and reached the plain torque type through the
-				// fall-through, so they are kept there rather than dropped.
-
-				// disable assistance if torque has been sensed for >5sec without any pedal movement. Prevents
-				// motor overtemps when the rider is just resting on the pedals
-				if(output == 0.0 || pedal_rpm > 0) {
-					out_ms_without_cadence_or_torque = 0.0;
-				} else {
-					out_ms_without_cadence_or_torque += (1000.0 * (float)sleep_time) / (float)CH_CFG_ST_FREQUENCY;
-					if(out_ms_without_cadence_or_torque > MAX_MS_WITHOUT_CADENCE_OR_TORQUE) {
-						output = 0.0;
-					}
-				}
-				// if cranks are not moving, there should not be any output. This covers the case of a torque sensor
-				// stuck with a non-zero signal.
-				if(pedal_rpm < 0.01) {
-					out_ms_without_cadence += (1000.0 * (float)sleep_time) / (float)CH_CFG_ST_FREQUENCY;
-					if(out_ms_without_cadence > MAX_MS_WITHOUT_CADENCE) {
-						output = 0.0;
-					}
-				} else {
-					out_ms_without_cadence = 0.0;
-				}
-			}
-			break;
-
-			default:
-				break;
-		}
+		output = pas_compute_output((1000.0 * (float)sleep_time) / (float)CH_CFG_ST_FREQUENCY);
 
 		// Apply ramping
 		float ramp_time = fabsf(output) > fabsf(out_ramp) ? config.ramp_time_pos : config.ramp_time_neg;

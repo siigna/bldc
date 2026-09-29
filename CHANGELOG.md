@@ -25,6 +25,11 @@
 	* A torque sensor reading at or above the ADC reference is reported as saturated rather than appearing as a plateau in the assist.
 	* An ADC channel the hardware does not provide is rejected. hw.h aliases the unavailable channels to the first one, so such a setting would otherwise read the throttle input.
 	* Added the pas_torque terminal command, which reads the sensor and measures its zero point.
+* App PAS proportional power control:
+	* New Proportional Power control type: motor power is a configurable multiple of rider power, where rider power is crank torque times cadence. Rider power was not a concept the app had.
+	* Optional revolution synchronous torque averaging, over a configurable number of pedal pulses. Crank torque varies strongly within a pedal stroke, and averaging whole pulse intervals does not change character with cadence the way a time constant does.
+	* The power request is converted to current against the measured input voltage, which is floored so that a low reading cannot inflate the request.
+	* The previously unlisted fourth PAS control type is now named in VESC Tool. It behaves identically to Constant Torque.
 
 ### 7.00
 #### 2026-05-15

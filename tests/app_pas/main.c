@@ -21,6 +21,8 @@ uint8_t test_pad[2] = {0, 0};
 mc_fault_code test_fault = FAULT_CODE_NONE;
 float test_current_rel = 0.0;
 volatile uint16_t ADC_Value[16] = {0};
+float test_v_in = 50.0;
+mc_configuration test_mcconf;
 
 // Stubs for the rest of the firmware that app_pas.c calls.
 static app_configuration test_appconf;
@@ -40,6 +42,7 @@ float hw_get_PAS_torque(void) { return test_torque; }
 // app_pas.c exposes the sensor front end without prototypes in app.h.
 void pas_event_handler(void);
 float pas_read_torque_nm(void);
+float pas_compute_output(float dt_ms);
 
 // Set the voltage an ADC channel reads.
 static void set_adc_volts(int ch, float volts) {
@@ -123,6 +126,21 @@ __attribute__((unused)) static void cycle_rev(systime_t ticks) {
 	}
 }
 
+// One quadrature cycle with the control loop run at a realistic rate. The
+// thread samples torque at update_rate_hz, which at 500 Hz and 60 rpm with 24
+// magnets is about 20 samples per pedal pulse, so a test that calls it once per
+// pulse would misrepresent the sensor filter.
+#define CTRL_CALLS_PER_PULSE	20
+
+static void cycle_fwd_with_control(systime_t ticks) {
+	for (int i = 0; i < 4; i++) {
+		transition(fwd_cycle[i], ticks / 4);
+		for (int k = 0; k < CTRL_CALLS_PER_PULSE / 4; k++) {
+			pas_compute_output(2.0);
+		}
+	}
+}
+
 // Ticks per magnet for a given crank cadence.
 static systime_t ticks_for_rpm(float rpm) {
 	return (systime_t)((60.0f / (rpm * (float)MAGNETS)) * (float)CH_CFG_ST_FREQUENCY);
@@ -153,6 +171,8 @@ static void pulse_single_wire(float rpm, int magnets_count) {
 static pas_config base_config(void) {
 	pas_config c;
 	memset(&c, 0, sizeof(c));
+	c.assist_gain = 1.0;
+	c.torque_avg_pulses = 0;
 	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
 	c.sensor_type = PAS_SENSOR_TYPE_QUADRATURE;
 	c.current_scaling = 0.5;
@@ -715,8 +735,358 @@ static void test_torque_source_hw_absent(void) {
 }
 #endif
 
+// Rider power is torque times angular velocity, and it is the concept the app
+// was missing entirely.
+static void test_rider_power(void) {
+	printf("rider power\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	c.assist_gain = 1.0;
+	setup(&c);
+
+	// 1.0 V at 30 Nm/V is 30 Nm. Pedal at 60 rpm, which is 2*pi rad/s, so
+	// rider power is 30 * 2*pi = about 188 W.
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	pedal(60.0, 12);
+	for (int i = 0; i < 80; i++) {
+		pas_compute_output(2.0);
+	}
+
+	float nm = app_pas_get_torque_nm();
+	float expect = nm * (60.0f * 2.0f * (float)M_PI / 60.0f);
+	check_near(app_pas_get_rider_power(), expect, 1.0, "rider power is torque times cadence");
+	check(app_pas_get_rider_power() > 150.0 && app_pas_get_rider_power() < 220.0,
+			"30 Nm at 60 rpm is about 190 W");
+}
+
+// Stopped cranks must mean no assist. With power control that falls out of the
+// arithmetic rather than needing an interlock, which is worth pinning down.
+static void test_power_zero_without_cadence(void) {
+	printf("power without cadence\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	setup(&c);
+
+	// Full weight on the pedals, cranks not turning.
+	set_adc_volts(ADC_IND_EXT, 2.0);
+	for (int i = 0; i < 100; i++) {
+		test_now += 100;
+		pas_event_handler();
+		pas_compute_output(10.0);
+	}
+
+	check(app_pas_get_torque_nm() > 10.0, "torque is being read");
+	check_near(app_pas_get_rider_power(), 0.0, 0.001, "no rider power without cadence");
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "no assist without cadence");
+}
+
+// The gain is motor watts per rider watt.
+static void test_assist_gain(void) {
+	printf("assist gain\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+
+	float outs[3];
+	const float gains[3] = {0.5, 1.0, 2.0};
+
+	for (int g = 0; g < 3; g++) {
+		c.assist_gain = gains[g];
+		setup(&c);
+		set_adc_volts(ADC_IND_EXT, 1.0);
+		pedal(60.0, 12);
+		for (int i = 0; i < 80; i++) {
+			outs[g] = pas_compute_output(2.0);
+		}
+		check_near(app_pas_get_motor_power_target(),
+				app_pas_get_rider_power() * gains[g], 1.0,
+				"motor power target is gain times rider power");
+	}
+
+	check_near(outs[1] / outs[0], 2.0, 0.05, "doubling the gain doubles the request");
+	check_near(outs[2] / outs[1], 2.0, 0.05, "and again");
+}
+
+// Watts become a current against the measured input voltage, and the assist
+// ceiling still applies.
+static void test_power_to_current(void) {
+	printf("power to current\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	c.assist_gain = 1.0;
+
+	test_mcconf.lo_current_max = 100.0;
+
+	// At twice the voltage, the same power is half the current.
+	test_v_in = 25.0;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	pedal(60.0, 12);
+	float out_low = 0.0;
+	for (int i = 0; i < 80; i++) {
+		out_low = pas_compute_output(2.0);
+	}
+
+	test_v_in = 50.0;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	pedal(60.0, 12);
+	float out_high = 0.0;
+	for (int i = 0; i < 80; i++) {
+		out_high = pas_compute_output(2.0);
+	}
+
+	check_near(out_low / out_high, 2.0, 0.05,
+			"halving the input voltage doubles the current for the same power");
+
+	// And the relative current is watts / volts / lo_current_max.
+	float expect = (app_pas_get_motor_power_target() / 50.0f) / 100.0f;
+	check_near(out_high, expect, 0.001, "relative current is against lo_current_max");
+
+	// The assist ceiling caps it.
+	c.current_scaling = 0.01;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 2.0);
+	pedal(90.0, 12);
+	float capped = 0.0;
+	for (int i = 0; i < 80; i++) {
+		capped = pas_compute_output(2.0);
+	}
+	check_near(capped, 0.01, 0.0001, "PAS max current caps the power request");
+
+	test_v_in = 50.0;
+	c.current_scaling = 1.0;
+}
+
+// An input voltage reading that is too low would inflate the current a power
+// request converts to, so it is floored.
+static void test_vin_guard(void) {
+	printf("input voltage guard\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	c.assist_gain = 1.0;
+	test_mcconf.lo_current_max = 100.0;
+
+	// 8 V is the floor.
+	test_v_in = 8.0;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	pedal(60.0, 12);
+	float at_floor = 0.0;
+	for (int i = 0; i < 80; i++) {
+		at_floor = pas_compute_output(2.0);
+	}
+
+	// A reading far below it must not ask for more than the floor does.
+	test_v_in = 0.1;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	pedal(60.0, 12);
+	float below = 0.0;
+	for (int i = 0; i < 80; i++) {
+		below = pas_compute_output(2.0);
+	}
+
+	check_near(below, at_floor, 0.0001,
+			"a voltage below the floor is treated as the floor, not as more current");
+
+	// Zero must not divide.
+	test_v_in = 0.0;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	pedal(60.0, 12);
+	float at_zero = 0.0;
+	for (int i = 0; i < 80; i++) {
+		at_zero = pas_compute_output(2.0);
+	}
+	check(isfinite(at_zero), "a zero voltage reading does not produce a non-finite request");
+	check_near(at_zero, at_floor, 0.0001, "and is also treated as the floor");
+
+	test_v_in = 50.0;
+}
+
+// Averaging over whole pulse intervals rather than applying a time constant.
+static void test_torque_averaging(void) {
+	printf("torque averaging\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+
+	// Pedalling and computing have to be interleaved, as they are on the board:
+	// the averaging window closes an interval when a pedal pulse arrives, so it
+	// only fills if torque is being sampled while the cranks turn.
+	systime_t t = ticks_for_rpm(60.0);
+
+	c.torque_avg_pulses = 0;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	for (int i = 0; i < 60; i++) {
+		cycle_fwd_with_control(t);
+	}
+	float steady_off = app_pas_get_rider_power();
+	check(steady_off > 0.0, "power with averaging off");
+
+	// With a window, a steady signal gives the same answer.
+	c.torque_avg_pulses = c.magnets;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	for (int i = 0; i < 60; i++) {
+		cycle_fwd_with_control(t);
+	}
+	float steady_on = app_pas_get_rider_power();
+	check_near(steady_on, steady_off, steady_off * 0.05f,
+			"a steady torque gives the same power averaged or not");
+}
+
+// The window must not carry torque across a stop and pair it with a fresh
+// cadence when pedalling resumes.
+static void test_averaging_reset_on_stop(void) {
+	printf("averaging reset on stop\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	c.torque_avg_pulses = c.magnets;
+	setup(&c);
+
+	systime_t t = ticks_for_rpm(60.0);
+
+	// Pedal hard, filling the window with a high torque.
+	set_adc_volts(ADC_IND_EXT, 2.0);
+	for (int i = 0; i < 60; i++) {
+		cycle_fwd_with_control(t);
+	}
+	float loaded = app_pas_get_rider_power();
+	check(loaded > 0.0, "power while pedalling under load");
+
+	// Stop, and drop the torque to nothing.
+	for (int i = 0; i < 100; i++) {
+		test_now += 100;
+		pas_event_handler();
+		pas_compute_output(10.0);
+	}
+	set_adc_volts(ADC_IND_EXT, 0.0);
+	check_near(app_pas_get_rider_power(), 0.0, 0.001, "no power while stopped");
+
+	// Resume with no force on the pedals. The first pulses must not be assisted
+	// from the torque recorded before the stop.
+	float peak = 0.0;
+	for (int i = 0; i < 12; i++) {
+		cycle_fwd_with_control(t);
+		float pw = app_pas_get_rider_power();
+		if (pw > peak) {
+			peak = pw;
+		}
+	}
+	check(peak < loaded * 0.1f,
+			"resuming without pedal force does not assist from the pre-stop torque");
+}
+
+// A window must actually smooth a torque that varies within the stroke, which
+// is what a bottom bracket sensor does.
+static void test_torque_averaging_smooths(void) {
+	printf("torque averaging smooths\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	c.magnets = 8;
+
+	// Drive a torque that alternates between pulses, as a pedal stroke does,
+	// and record the spread of the resulting power.
+	float spread[2];
+	const int windows[2] = {0, 8};
+
+	for (int w = 0; w < 2; w++) {
+		c.torque_avg_pulses = windows[w];
+		setup(&c);
+
+		// Fill the window first.
+		systime_t t = ticks_for_rpm(60.0);
+		for (int rev = 0; rev < 6; rev++) {
+			for (int m = 0; m < 8; m++) {
+				set_adc_volts(ADC_IND_EXT, (m < 4) ? 1.5f : 0.5f);
+				cycle_fwd_with_control(t);
+			}
+		}
+
+		float lo = 1e9f;
+		float hi = -1e9f;
+		for (int rev = 0; rev < 4; rev++) {
+			for (int m = 0; m < 8; m++) {
+				set_adc_volts(ADC_IND_EXT, (m < 4) ? 1.5f : 0.5f);
+				cycle_fwd_with_control(t);
+				float pw = app_pas_get_rider_power();
+				if (pw < lo) {
+					lo = pw;
+				}
+				if (pw > hi) {
+					hi = pw;
+				}
+			}
+		}
+		spread[w] = hi - lo;
+	}
+
+	check(spread[0] > 0.0, "an unaveraged reading varies through the stroke");
+	check(spread[1] < spread[0] * 0.5f,
+			"a one revolution window at least halves the variation through the stroke");
+}
+
 int main(void) {
 	memset(&test_appconf, 0, sizeof(test_appconf));
+	memset(&test_mcconf, 0, sizeof(test_mcconf));
+	test_mcconf.lo_current_max = 100.0;
 	test_appconf.app_to_use = APP_PAS;
 	test_appconf.permanent_uart_enabled = false;
 
@@ -753,6 +1123,17 @@ int main(void) {
 	test_torque_source_hw();
 #else
 	test_torque_source_hw_absent();
+#endif
+
+#ifndef TEST_NO_PAS_PINS
+	test_rider_power();
+	test_power_zero_without_cadence();
+	test_assist_gain();
+	test_power_to_current();
+	test_vin_guard();
+	test_torque_averaging();
+	test_averaging_reset_on_stop();
+	test_torque_averaging_smooths();
 #endif
 
 	printf("\n%d checks, %d failures\n", checks, failures);
