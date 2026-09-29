@@ -90,6 +90,7 @@ float app_pas_get_assist_basis_power(void);
 float app_pas_get_speed_taper(void);
 int app_pas_get_flags(void);
 float app_pas_apply_to_throttle(float throttle_rel);
+void app_pas_walk_set(bool active);
 float pas_mix_throttle(float throttle_rel, float pas_rel);
 
 // Bits returned by app_pas_get_flags()
@@ -101,6 +102,8 @@ float pas_mix_throttle(float throttle_rel, float pas_rel);
 #define PAS_FLAG_SENSOR_UNSUPPORTED		(1 << 5)
 #define PAS_FLAG_TORQUE_SRC_UNSUPPORTED	(1 << 6)
 #define PAS_FLAG_SPEED_LIMITED			(1 << 7)
+#define PAS_FLAG_WALK_ACTIVE			(1 << 8)
+#define PAS_FLAG_WALK_CH_INVALID		(1 << 9)
 float app_pas_get_motor_power_target(void);
 void app_pas_set_current_sub_scaling(float current_sub_scaling);
 

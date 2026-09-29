@@ -52,6 +52,15 @@
 // only ask for less current than intended.
 #define PAS_MIN_VIN						8.0
 
+// A walk request from a script is a keepalive, not a latch: it expires unless
+// it is refreshed. Otherwise a display that stopped talking, or a script that
+// died while the button was held, would leave the motor pushing.
+#define WALK_LISP_TIMEOUT_S			0.5
+
+// Walk assist fades out over this much speed below the limit, so that it does
+// not switch on and off at the threshold.
+#define WALK_TAPER_KMH				1.0
+
 // Threads
 static THD_FUNCTION(pas_thread, arg);
 __attribute__((section(".ram4"))) static THD_WORKING_AREA(pas_thread_wa, 512);
@@ -92,6 +101,11 @@ static volatile float motor_power_w = 0.0;
 static volatile bool brake_engaged = false;
 static volatile bool brake_ch_invalid = false;
 static volatile float speed_taper = 1.0;
+static volatile bool walk_active = false;
+static volatile bool walk_ch_invalid = false;
+static volatile bool walk_lisp_request = false;
+static volatile systime_t walk_lisp_time = 0;
+static bool walk_was_active = false;
 
 // Revolution synchronous torque averaging. A bottom bracket torque signal
 // varies strongly within a pedal stroke, so the mean over one pulse interval is
@@ -169,6 +183,9 @@ void app_pas_configure(pas_config *conf) {
 	brake_engaged = false;
 	brake_ch_invalid = false;
 	speed_taper = 1.0;
+	walk_active = false;
+	walk_ch_invalid = false;
+	walk_was_active = false;
 	torque_ring_pos = 0;
 	torque_ring_fill = 0;
 	torque_pulse_sum = 0.0;
@@ -503,6 +520,95 @@ static bool pas_brake_active(void) {
 }
 
 /**
+ * Set or clear the walk assist request from a script.
+ *
+ * This is a keepalive rather than a latch. It has to be called repeatedly while
+ * the button is held, because it expires after WALK_LISP_TIMEOUT_S. A display
+ * that loses power or a script that stops running therefore releases walk
+ * assist rather than leaving the motor driving.
+ */
+void app_pas_walk_set(bool active) {
+	walk_lisp_request = active;
+	walk_lisp_time = chVTGetSystemTimeX();
+}
+
+/**
+ * True when walk assist should be driving.
+ *
+ * Unlike pedal assist, this is meant to move the vehicle with nobody on it and
+ * the cranks still, so it deliberately does not use the cadence interlock that
+ * makes the pedal assist types safe. Everything that keeps it in check is here:
+ * it needs an explicit source, it is capped in speed, and walk_require_pedal
+ * can put the cadence requirement back for anyone who wants it.
+ */
+static bool pas_walk_active(void) {
+	bool requested = false;
+
+	switch (config.walk_source) {
+		case PAS_WALK_SRC_LISP:
+			requested = walk_lisp_request &&
+					UTILS_AGE_S(walk_lisp_time) < WALK_LISP_TIMEOUT_S;
+			break;
+
+		case PAS_WALK_SRC_ADC: {
+			int adc_ch = pas_adc_index(config.walk_adc_ch);
+
+			if (adc_ch < 0) {
+				walk_ch_invalid = true;
+				return false;
+			}
+			walk_ch_invalid = false;
+
+			const bool over = ADC_VOLTS(adc_ch) >= config.walk_threshold_v;
+			requested = config.walk_invert ? !over : over;
+		} break;
+
+		default:
+			return false;
+	}
+
+	if (!requested) {
+		return false;
+	}
+
+	// Optional: only walk while the cranks are turning, for anyone who would
+	// rather not have a button that drives the vehicle on its own.
+	if (config.walk_require_pedal && pedal_rpm < 0.01) {
+		return false;
+	}
+
+	return true;
+}
+
+/**
+ * The relative current walk assist should apply.
+ *
+ * Faded out approaching the speed limit rather than cut at it, so that walk
+ * assist settles at the limit instead of pulsing against it. There is no
+ * closed loop on speed, so the limit is where assist stops rather than a speed
+ * it will hold.
+ */
+static float pas_walk_output(void) {
+	const float kmh = mc_interface_get_speed() * 3.6;
+	const float limit = config.walk_max_kmh;
+
+	if (limit <= 0.01 || kmh >= limit) {
+		return 0.0;
+	}
+
+	float scale = 1.0;
+
+	if (kmh > (limit - WALK_TAPER_KMH)) {
+		scale = utils_map(kmh, limit - WALK_TAPER_KMH, limit, 1.0, 0.0);
+		utils_truncate_number(&scale, 0.0, 1.0);
+	}
+
+	float output = config.walk_current * scale;
+	utils_truncate_number(&output, 0.0, config.walk_current);
+	return output;
+}
+
+/**
  * Cap a relative current request so that it does not exceed a power limit.
  *
  * Applied to the relative current rather than inside the power control type, so
@@ -831,6 +937,28 @@ static void terminal_pas_status(int argc, const char **argv) {
 		commands_printf("Brake             : off");
 	}
 
+	if (config.walk_source != PAS_WALK_SRC_NONE) {
+		commands_printf("Walk assist       : %s, %.0f%% current to %.1f km/h%s",
+			config.walk_source == PAS_WALK_SRC_LISP ? "script" : "ADC",
+			(double)(config.walk_current * 100.0), (double)config.walk_max_kmh,
+			walk_active ? "  ACTIVE" : "");
+		commands_printf("  Cranks            : %s",
+			config.walk_require_pedal ? "must be turning" : "not required");
+		if (config.walk_source == PAS_WALK_SRC_ADC) {
+			commands_printf("  ADC ch            : %d%s, threshold %.2f V%s",
+				(int)config.walk_adc_ch + 1,
+				walk_ch_invalid ? " NOT AVAILABLE" : "",
+				(double)config.walk_threshold_v,
+				config.walk_invert ? " inverted" : "");
+		}
+		if (config.walk_source == PAS_WALK_SRC_LISP) {
+			commands_printf("  A script must call app-pas-walk-set repeatedly while held;");
+			commands_printf("  the request expires after %.1f s.", (double)WALK_LISP_TIMEOUT_S);
+		}
+	} else {
+		commands_printf("Walk assist       : off");
+	}
+
 	commands_printf("Throttle mix      : %s",
 			config.throttle_mode == PAS_THROTTLE_PRIORITY ?
 				"throttle takes priority" : "whichever asks for more");
@@ -975,6 +1103,12 @@ int app_pas_get_flags(void) {
 	}
 	if (brake_engaged) {
 		flags |= PAS_FLAG_BRAKE_ENGAGED;
+	}
+	if (walk_active) {
+		flags |= PAS_FLAG_WALK_ACTIVE;
+	}
+	if (walk_ch_invalid) {
+		flags |= PAS_FLAG_WALK_CH_INVALID;
 	}
 	if (pins_unavailable) {
 		flags |= PAS_FLAG_PINS_UNAVAILABLE;
@@ -1207,6 +1341,31 @@ float app_pas_apply_to_throttle(float throttle_rel) {
  */
 float pas_compute_output(float dt_ms) {
 	float output = 0.0;
+
+	// Walk assist replaces the control type entirely rather than adding to it,
+	// and bypasses the ramp so that releasing the trigger stops the motor at
+	// once rather than over ramp_time_neg. The brake still overrides it.
+	walk_active = pas_walk_active();
+
+	if (walk_active) {
+		walk_was_active = true;
+		output = pas_walk_output();
+		out_ramp = output;
+
+		brake_engaged = pas_brake_active();
+		if (brake_engaged) {
+			out_ramp = 0.0;
+			output = 0.0;
+		}
+
+		return output;
+	}
+
+	// Leaving walk assist must not ramp down from the walk current.
+	if (walk_was_active) {
+		walk_was_active = false;
+		out_ramp = 0.0;
+	}
 
 	switch (config.ctrl_type) {
 		case PAS_CTRL_TYPE_NONE:

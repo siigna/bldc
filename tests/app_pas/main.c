@@ -55,6 +55,7 @@ void pas_event_handler(void);
 float pas_read_torque_nm(void);
 float pas_compute_output(float dt_ms);
 float pas_mix_throttle(float throttle_rel, float pas_rel);
+void app_pas_walk_set(bool active);
 
 // Set the voltage an ADC channel reads.
 static void set_adc_volts(int ch, float volts) {
@@ -1763,6 +1764,175 @@ static void test_throttle_needs_pedalling(void) {
 	test_speed = 0.0;
 }
 
+static pas_config walk_config(void) {
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	c.current_scaling = 1.0;
+	c.pedal_rpm_start = 10.0;
+	c.pedal_rpm_end = 100.0;
+	c.walk_source = PAS_WALK_SRC_LISP;
+	c.walk_max_kmh = 6.0;
+	c.walk_current = 0.05;
+	c.walk_require_pedal = false;
+	return c;
+}
+
+static void test_walk_basic(void) {
+	printf("walk assist\n");
+	pas_config c = walk_config();
+	setup(&c);
+	test_speed = 0.0;
+
+	// Nothing until it is requested, even though the cranks are still, which is
+	// the difference from the pedal assist types.
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "no walk assist until requested");
+
+	app_pas_walk_set(true);
+	check_near(pas_compute_output(2.0), 0.05, 0.0001,
+			"walk assist drives with the cranks stopped");
+	check(0 != (app_pas_get_flags() & PAS_FLAG_WALK_ACTIVE), "the walk flag is set");
+
+	// Releasing stops it at once rather than over the ramp.
+	app_pas_walk_set(false);
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "releasing stops it immediately");
+	check(0 == (app_pas_get_flags() & PAS_FLAG_WALK_ACTIVE), "the walk flag clears");
+
+	// A source of None ignores the request entirely.
+	c.walk_source = PAS_WALK_SRC_NONE;
+	setup(&c);
+	app_pas_walk_set(true);
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "no walk assist without a source");
+	app_pas_walk_set(false);
+}
+
+// The script request is a keepalive. A display that stops talking must release
+// walk assist rather than leave the motor driving.
+static void test_walk_keepalive_expires(void) {
+	printf("walk keepalive\n");
+	pas_config c = walk_config();
+	setup(&c);
+	test_speed = 0.0;
+
+	app_pas_walk_set(true);
+	check(pas_compute_output(2.0) > 0.0, "driving while the request is fresh");
+
+	// Refreshed inside the window, it keeps going indefinitely.
+	for (int i = 0; i < 10; i++) {
+		test_now += 3000;			// 300 ms, inside the 500 ms window
+		app_pas_walk_set(true);
+		check_near(pas_compute_output(2.0), 0.05, 0.0001, "refreshed, still driving");
+	}
+
+	// Left unrefreshed, it expires.
+	test_now += 6000;				// 600 ms, past the 500 ms timeout
+	check_near(pas_compute_output(2.0), 0.0, 0.001,
+			"an unrefreshed request expires and stops the motor");
+
+	app_pas_walk_set(false);
+}
+
+// The speed limit fades it out rather than cutting, and stops it above.
+static void test_walk_speed_limit(void) {
+	printf("walk speed limit\n");
+	pas_config c = walk_config();
+	setup(&c);
+
+	app_pas_walk_set(true);
+
+	test_speed = 2.0 / 3.6;
+	check_near(pas_compute_output(2.0), 0.05, 0.0001, "full walk current well below the limit");
+
+	// The taper band is the last 1 km/h, so 5.5 of 6 is half.
+	test_speed = 5.5 / 3.6;
+	check_near(pas_compute_output(2.0), 0.025, 0.002, "half way through the taper band");
+
+	test_speed = 6.0 / 3.6;
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "nothing at the limit");
+
+	test_speed = 9.0 / 3.6;
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "nothing above the limit");
+
+	app_pas_walk_set(false);
+	test_speed = 0.0;
+}
+
+// Both behaviours, since either is reasonable.
+static void test_walk_require_pedal(void) {
+	printf("walk requires pedalling\n");
+	pas_config c = walk_config();
+	test_speed = 0.0;
+
+	// Off: it drives with the cranks stopped, which is the point of it.
+	c.walk_require_pedal = false;
+	setup(&c);
+	app_pas_walk_set(true);
+	check(pas_compute_output(2.0) > 0.0, "off, walk assist drives with the cranks stopped");
+	app_pas_walk_set(false);
+
+	// On: the request alone does nothing.
+	c.walk_require_pedal = true;
+	setup(&c);
+	app_pas_walk_set(true);
+	check_near(pas_compute_output(2.0), 0.0, 0.001,
+			"on, the request alone does nothing with the cranks stopped");
+
+	// On, and pedalling: it drives.
+	pedal(50.0, 12);
+	app_pas_walk_set(true);
+	check(app_pas_get_pedal_rpm() > 1.0, "pedalling");
+	check(pas_compute_output(2.0) > 0.0, "on, walk assist drives while pedalling");
+	app_pas_walk_set(false);
+}
+
+// The brake has to win over walk assist as it does over pedal assist.
+static void test_walk_brake_overrides(void) {
+	printf("walk brake override\n");
+	pas_config c = walk_config();
+	c.brake_source = PAS_BRAKE_SRC_ADC;
+	c.brake_adc_ch = PAS_TORQUE_ADC_EXT2;
+	c.brake_threshold_v = 1.65;
+	setup(&c);
+	test_speed = 0.0;
+
+	set_adc_volts(ADC_IND_EXT2, 0.0);
+	app_pas_walk_set(true);
+	check(pas_compute_output(2.0) > 0.0, "driving with the brake released");
+
+	set_adc_volts(ADC_IND_EXT2, 3.0);
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "the brake stops walk assist");
+
+	app_pas_walk_set(false);
+}
+
+// Walk assist replaces the control type rather than adding to it, and leaving it
+// must not ramp down from the walk current.
+static void test_walk_replaces_and_releases(void) {
+	printf("walk replaces assist\n");
+	pas_config c = walk_config();
+	c.walk_current = 0.4;
+	c.ramp_time_pos = 0.2;
+	c.ramp_time_neg = 2.0;
+	setup(&c);
+	test_speed = 0.0;
+
+	// Pedalling gives cadence assist, ramping up.
+	pedal(50.0, 12);
+	for (int i = 0; i < 400; i++) {
+		pas_compute_output(2.0);
+	}
+	float pedalling = pas_compute_output(2.0);
+	check(pedalling > 0.0, "cadence assist while pedalling");
+
+	// Walk takes over at its own current, not the sum.
+	app_pas_walk_set(true);
+	check_near(pas_compute_output(2.0), 0.4, 0.0001, "walk assist replaces the assist output");
+
+	// Releasing walk drops straight out rather than ramping down from 0.4.
+	app_pas_walk_set(false);
+	float after = pas_compute_output(2.0);
+	check(after < 0.05, "leaving walk assist does not ramp down from the walk current");
+}
+
 int main(void) {
 	memset(&test_appconf, 0, sizeof(test_appconf));
 	memset(&test_mcconf, 0, sizeof(test_mcconf));
@@ -1832,6 +2002,12 @@ int main(void) {
 	test_assist_start_power();
 	test_throttle_mixing();
 	test_throttle_needs_pedalling();
+	test_walk_basic();
+	test_walk_keepalive_expires();
+	test_walk_speed_limit();
+	test_walk_require_pedal();
+	test_walk_brake_overrides();
+	test_walk_replaces_and_releases();
 #endif
 
 	printf("\n%d checks, %d failures\n", checks, failures);

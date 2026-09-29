@@ -715,6 +715,14 @@ typedef enum {
 	PAS_TORQUE_ADC_EXT8
 } pas_adc_ch;
 
+// Where the PAS walk assist trigger comes from
+typedef enum {
+	PAS_WALK_SRC_NONE = 0,
+	// Held by a script, which must keep refreshing it
+	PAS_WALK_SRC_LISP,
+	PAS_WALK_SRC_ADC
+} pas_walk_source;
+
 // How PAS output combines with a throttle, when both apps run
 typedef enum {
 	// Use whichever is asking for more, which is what this firmware has
@@ -821,6 +829,13 @@ typedef struct {
 	float assist_start_w;
 	pas_throttle_mode throttle_mode;
 	float throttle_no_pedal_kmh;
+	pas_walk_source walk_source;
+	pas_adc_ch walk_adc_ch;
+	float walk_threshold_v;
+	bool walk_invert;
+	float walk_max_kmh;
+	float walk_current;
+	bool walk_require_pedal;
 } pas_config;
 
 // NRF Datatypes

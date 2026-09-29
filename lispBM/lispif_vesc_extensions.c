@@ -1919,6 +1919,22 @@ static lbm_value ext_app_pas_get_flags(lbm_value *args, lbm_uint argn) {
 	return lbm_enc_i(app_pas_get_flags());
 }
 
+static lbm_value ext_app_pas_walk_set(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN(1);
+	bool active = false;
+
+	if (lbm_is_number(args[0])) {
+		active = lbm_dec_as_i32(args[0]) != 0;
+	} else if (lbm_is_symbol_true(args[0])) {
+		active = true;
+	} else if (!lbm_is_symbol_nil(args[0])) {
+		return ENC_SYM_TERROR;
+	}
+
+	app_pas_walk_set(active);
+	return ENC_SYM_TRUE;
+}
+
 // Motor set commands
 
 static lbm_value ext_set_current(lbm_value *args, lbm_uint argn) {
@@ -6660,6 +6676,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("app-pas-get-assist-power", ext_app_pas_get_assist_power);
 		lbm_add_extension("app-pas-get-output", ext_app_pas_get_output);
 		lbm_add_extension("app-pas-get-flags", ext_app_pas_get_flags);
+		lbm_add_extension("app-pas-walk-set", ext_app_pas_walk_set);
 
 		// Motor set commands
 		lbm_add_extension("set-current", ext_set_current);

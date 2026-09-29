@@ -1248,6 +1248,26 @@ Returns a bitfield of conditions in the PAS-app that are worth reporting:
 | 5 | The configured sensor type is not supported |
 | 6 | The hardware torque source is selected but this board does not implement one |
 | 7 | Assist is being reduced by the road speed taper |
+| 8 | Walk assist is driving |
+| 9 | The configured walk assist ADC channel does not exist on this hardware |
+
+---
+
+#### app-pas-walk-set
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(app-pas-walk-set active)
+```
+
+Request or release PAS walk assist, where `active` is true, false or a number. Requires the PAS walk assist source to be set to Script.
+
+This is a keepalive rather than a latch: **it must be called repeatedly while the button is held, because the request expires after 0.5 seconds**. A display that loses power, or a script that stops running while the button is held, therefore releases walk assist instead of leaving the motor driving.
+
+Walk assist replaces the normal PAS output rather than adding to it, bypasses the output ramp so that releasing it stops the motor at once, is limited by its own speed setting rather than the assist speed taper, and is overridden by the brake input. Unlike the pedal assist control types it will drive with the cranks stopped, which is the point of it; set PAS Walk Requires Pedalling if that is not wanted.
 
 ---
 

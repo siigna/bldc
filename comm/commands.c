@@ -485,7 +485,8 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 			buffer_append_float16(send_buffer, app_pas_get_rider_power(), 1e0, &ind);
 			buffer_append_float16(send_buffer, app_pas_get_motor_power_target(), 1e0, &ind);
 			buffer_append_float16(send_buffer, app_pas_get_current_target_rel(), 1e3, &ind);
-			send_buffer[ind++] = app_pas_get_flags();
+			// Sixteen bits: the flag set already needs nine, and it will grow.
+			buffer_append_uint16(send_buffer, app_pas_get_flags(), &ind);
 		}
 
 		reply_func(send_buffer, ind);

@@ -42,6 +42,12 @@
 	* Support for bipolar torque sensors, which rest mid range and swing both ways to measure the left and right pedal separately, such as a Thun.
 	* A minimum rider power before the motor contributes anything, subtracted from the assist basis before the gain, as a Cycle Analyst applies its start level.
 	* app_pas_stop() now clears the exported current target in both modes. It was only cleared when PAS was not the primary output, which matters now that the throttle app reads it for every current control type.
+* App PAS walk assist:
+	* Walk assist, triggered either by a LispBM script through the new app-pas-walk-set extension or by a switch on a configurable ADC channel.
+	* A script request is a keepalive that expires after half a second, so a display that loses power or a script that stops while the button is held releases it rather than leaving the motor driving.
+	* It replaces the normal PAS output rather than adding to it, bypasses the output ramp so releasing it stops the motor at once, has its own speed limit that it fades out against, and is overridden by the brake.
+	* It drives with the cranks stopped, which is the point of it, so PAS Walk Requires Pedalling is there for anyone who would rather it did not.
+	* The PAS status flags are now sixteen bits on the wire rather than eight, since the set needs nine.
 	* The parameter descriptions now carry what the Grin Cycle Analyst manuals give for setting these by hand: how to determine the pulses per crank revolution, typical scales for bottom bracket and chain tension sensors, the bench procedure for measuring the scale with a known weight, and that a chain tension sensor's scale depends on chainring size. The pas_torque terminal command prints the same procedure.
 
 ### 7.01
