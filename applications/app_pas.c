@@ -432,6 +432,13 @@ static float pas_power_to_current_rel(float watts) {
 		return 0.0;
 	}
 
+	// Open loop: the request becomes a current and is then bounded by the
+	// existing current limits, rather than being regulated against measured
+	// power. A Cycle Analyst closes the loop here with a power PID, which is
+	// why its tuning notes discuss surge and lag from the power gain. The trade
+	// is that this cannot overshoot or oscillate, but the delivered power sits
+	// below the request wherever the motor cannot take the current, and nothing
+	// corrects for that.
 	return (watts / v_in) / i_max;
 }
 
@@ -682,6 +689,9 @@ static void terminal_pas_torque(int argc, const char **argv) {
 		}
 		commands_printf(" ");
 		commands_printf("Run \"pas_torque zero\" with no force on the cranks to measure the zero point.");
+		commands_printf("To measure the scale: brake the rear wheel, hang a known weight on");
+		commands_printf("the forward pedal, take the voltage change, then");
+		commands_printf("  Nm/V = weight_lb * 4.44 * crank_m / volts_change");
 	}
 
 	commands_printf(" ");

@@ -42,6 +42,7 @@
 	* Support for bipolar torque sensors, which rest mid range and swing both ways to measure the left and right pedal separately, such as a Thun.
 	* A minimum rider power before the motor contributes anything, subtracted from the assist basis before the gain, as a Cycle Analyst applies its start level.
 	* app_pas_stop() now clears the exported current target in both modes. It was only cleared when PAS was not the primary output, which matters now that the throttle app reads it for every current control type.
+	* The parameter descriptions now carry what the Grin Cycle Analyst manuals give for setting these by hand: how to determine the pulses per crank revolution, typical scales for bottom bracket and chain tension sensors, the bench procedure for measuring the scale with a known weight, and that a chain tension sensor's scale depends on chainring size. The pas_torque terminal command prints the same procedure.
 
 ### 7.01
 #### TBD
