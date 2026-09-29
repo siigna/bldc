@@ -657,11 +657,16 @@
 #endif
 #endif
 
+// Hardware without dedicated pedal sensor pins falls back to the COMM UART
+// pads. Those pads are shared with UART communication, which includes the link
+// to a VESC Express module, so HW_PAS_PINS_SHARED_WITH_UART marks the fallback
+// and the PAS app only claims the pads when UART comms is not in use.
 #ifndef HW_PAS1_PORT
 #define HW_PAS1_PORT			HW_UART_RX_PORT
 #define HW_PAS1_PIN				HW_UART_RX_PIN
 #define HW_PAS2_PORT			HW_UART_TX_PORT
 #define HW_PAS2_PIN				HW_UART_TX_PIN
+#define HW_PAS_PINS_SHARED_WITH_UART
 #endif
 
 #ifndef HW_ICU_TIMER

@@ -9,6 +9,15 @@
 	* Many new extensions and access to more configuration parameters.
 * Added PWM + ABI Inverted encoder mode.
 * App ADC coasting brake support.
+* App PAS fixes:
+	* The pedal sensor filter setting is now applied. It selected a low-pass that was configured to pass the input through unchanged.
+	* Cadence no longer loses accuracy as uptime grows. Pedal timing was taken as a difference of absolute float seconds.
+	* The pedal sensor type setting is now read, and an unsupported value reports rather than decoding as if it were supported.
+	* The torque control types report on hardware without a torque sensor instead of producing no output.
+	* Selecting the torque type with the cadence timeout now samples the torque sensor. It previously only worked when entered by fall-through.
+	* The pedal decoder and output ramp are reset when the app is reconfigured or restarted.
+	* The COMM UART pads, which are the fallback when a board has no dedicated pedal sensor pins, are no longer reconfigured as inputs while UART communication is in use.
+	* Added the pas_status terminal command.
 
 ### 7.00
 #### 2026-05-15
