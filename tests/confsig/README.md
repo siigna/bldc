@@ -18,9 +18,22 @@ Note that a parameter with no `<vTx>` element contributes `0`, the
 `VESC_TX_UNDEFINED` the `ConfigParam` constructor leaves in place — 45 of the
 appconf parameters are in that position, so it is not an edge case.
 
-Verified against the checked-in values for 7.01:
+Verified against the values checked in for stock 7.01:
 
 | config | signature |
 |---|---|
 | appconf | 296593100 |
 | mcconf | 3154770096 |
+
+## checkconf.py
+
+Checks that `confgenerator.c` and `confgenerator.h` agree with the XML they were
+generated from, in both the signature and the field order:
+
+    ./checkconf.py ../.. ../../../vesc_tool/res/config/7.01
+
+Worth having because the signature cannot catch an error in `confgenerator.c`
+alone: it is a constant stored in the header, not something derived from the
+serialisation code. Swap two adjacent fields in `confgenerator.c` and the
+signature still matches, while every field from that point on is written to the
+wrong place and the configuration still loads.

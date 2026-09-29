@@ -5,7 +5,7 @@ CFLAGS = -O2 -g -Wall -Wextra -Wundef -Wno-unused-function -std=gnu99 -DNO_STM32
          -I. -I../.. -I../../util -I../../applications -I../../motor -I../../comm
 LIBS = -lm
 
-SOURCES = main.c ../../applications/app_pas.c
+SOURCES = main.c ../../applications/app_pas.c ../../util/utils_math.c
 
 # Board configurations to cover. The empty one is dedicated pedal sensor pins
 # with no torque sensor.
