@@ -22,3 +22,8 @@ workspace.code-workspace
 compile_commands.json
 
 /result
+
+# Vim swap files. A stray one has been committed here before: it is 12 KB of
+# binary that git add -A picks up silently.
+*.swp
+.*.swp
