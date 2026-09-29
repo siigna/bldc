@@ -54,6 +54,7 @@ float hw_get_PAS_torque(void) { return test_torque; }
 void pas_event_handler(void);
 float pas_read_torque_nm(void);
 float pas_compute_output(float dt_ms);
+float pas_mix_throttle(float throttle_rel, float pas_rel);
 
 // Set the voltage an ADC channel reads.
 static void set_adc_volts(int ch, float volts) {
@@ -1604,6 +1605,164 @@ static void test_start_threshold(void) {
 			"a start threshold above the pulse gap decodes normally");
 }
 
+// A Thun-style sensor rests mid range and swings both ways, so both directions
+// are pedal effort.
+static void test_torque_bipolar(void) {
+	printf("torque bipolar\n");
+	pas_config c = base_config();
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 1.65;			// mid rail
+	c.torque_nm_per_v = 100.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.torque_bipolar = true;
+
+	// Half a volt either side of the zero point is the same torque.
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 2.15);
+	for (int i = 0; i < 80; i++) {
+		pas_read_torque_nm();
+	}
+	float above = pas_read_torque_nm();
+
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.15);
+	for (int i = 0; i < 80; i++) {
+		pas_read_torque_nm();
+	}
+	float below = pas_read_torque_nm();
+
+	check(above > 40.0, "torque above the zero point");
+	check_near(below, above, 0.5, "the same magnitude below the zero point");
+
+	// Unipolar discards the low side, which is the behaviour a sensor resting
+	// at the bottom of its range needs.
+	c.torque_bipolar = false;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.15);
+	for (int i = 0; i < 80; i++) {
+		pas_read_torque_nm();
+	}
+	check_near(pas_read_torque_nm(), 0.0, 0.001, "unipolar reads nothing below the zero point");
+}
+
+// A minimum rider power before the motor contributes, which is a power
+// threshold rather than a force one.
+static void test_assist_start_power(void) {
+	printf("assist start power\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT1;
+	c.torque_zero_v = 0.0;
+	c.torque_nm_per_v = 30.0;
+	c.torque_max_nm = 200.0;
+	c.torque_deadband_nm = 0.0;
+	c.current_scaling = 1.0;
+	c.assist_gain = 1.0;
+	c.cadence_floor_rpm = 0.0;
+	ramp_off(&c);
+
+	// Without a start level, assist tracks the basis.
+	c.assist_start_w = 0.0;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	systime_t t = ticks_for_rpm(60.0);
+	for (int i = 0; i < 40; i++) {
+		cycle_fwd_with_control(t);
+	}
+	float basis = app_pas_get_assist_basis_power();
+	check_near(app_pas_get_motor_power_target(), basis, 1.0, "no start level, assist is the basis");
+
+	// With one, it is subtracted before the gain.
+	c.assist_start_w = 50.0;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	for (int i = 0; i < 40; i++) {
+		cycle_fwd_with_control(t);
+	}
+	check_near(app_pas_get_motor_power_target(),
+			app_pas_get_assist_basis_power() - 50.0, 1.5,
+			"the start level is subtracted before the gain");
+
+	// A start level above the rider's effort means no assist at all, not
+	// negative assist.
+	c.assist_start_w = 10000.0;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT, 1.0);
+	for (int i = 0; i < 40; i++) {
+		cycle_fwd_with_control(t);
+	}
+	check_near(app_pas_get_motor_power_target(), 0.0, 0.001,
+			"a start level above the rider effort gives no assist");
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "and no output");
+}
+
+// Both throttle mixing policies, since both are defensible and the choice is
+// now a setting.
+static void test_throttle_mixing(void) {
+	printf("throttle mixing\n");
+	pas_config c = base_config();
+	c.throttle_no_pedal_kmh = 0.0;
+
+	// Highest wins: a throttle can only add.
+	c.throttle_mode = PAS_THROTTLE_MAX;
+	setup(&c);
+	check_near(pas_mix_throttle(0.2, 0.5), 0.5, 0.001, "highest wins takes the PAS output");
+	check_near(pas_mix_throttle(0.7, 0.5), 0.7, 0.001, "highest wins takes the throttle");
+	check_near(pas_mix_throttle(0.0, 0.5), 0.5, 0.001, "no throttle leaves the assist");
+
+	// Throttle priority: any throttle takes over, even below the assist.
+	c.throttle_mode = PAS_THROTTLE_PRIORITY;
+	setup(&c);
+	check_near(pas_mix_throttle(0.2, 0.5), 0.2, 0.001,
+			"throttle priority takes the throttle even when it asks for less");
+	check_near(pas_mix_throttle(0.7, 0.5), 0.7, 0.001, "and when it asks for more");
+	check_near(pas_mix_throttle(0.0, 0.5), 0.5, 0.001,
+			"a released throttle leaves the assist");
+	check_near(pas_mix_throttle(0.005, 0.5), 0.5, 0.001,
+			"and so does a throttle below the takeover threshold");
+}
+
+// Above a configured speed the throttle needs pedalling, which is how a pedelec
+// arrangement is usually expressed.
+static void test_throttle_needs_pedalling(void) {
+	printf("throttle needs pedalling\n");
+	pas_config c = base_config();
+	c.throttle_mode = PAS_THROTTLE_MAX;
+	c.throttle_no_pedal_kmh = 6.0;
+
+	// Below the limit, the throttle works without pedalling.
+	setup(&c);
+	test_speed = 4.0 / 3.6;
+	check_near(pas_mix_throttle(0.6, 0.0), 0.6, 0.001,
+			"below the limit the throttle works without pedalling");
+
+	// Above it, not while stopped.
+	setup(&c);
+	test_speed = 10.0 / 3.6;
+	check_near(pas_mix_throttle(0.6, 0.0), 0.0, 0.001,
+			"above the limit a throttle alone does nothing");
+
+	// Above it while pedalling, it works.
+	setup(&c);
+	test_speed = 10.0 / 3.6;
+	pedal(50.0, 12);
+	check(app_pas_get_pedal_rpm() > 1.0, "pedalling");
+	check_near(pas_mix_throttle(0.6, 0.0), 0.6, 0.001,
+			"above the limit the throttle works while pedalling");
+
+	// Zero disables the check, which is the difference from a Cycle Analyst.
+	c.throttle_no_pedal_kmh = 0.0;
+	setup(&c);
+	test_speed = 40.0 / 3.6;
+	check_near(pas_mix_throttle(0.6, 0.0), 0.6, 0.001,
+			"zero leaves the throttle working at any speed");
+
+	test_speed = 0.0;
+}
+
 int main(void) {
 	memset(&test_appconf, 0, sizeof(test_appconf));
 	memset(&test_mcconf, 0, sizeof(test_mcconf));
@@ -1669,6 +1828,10 @@ int main(void) {
 	test_stop_threshold();
 	test_thresholds_derived();
 	test_start_threshold();
+	test_torque_bipolar();
+	test_assist_start_power();
+	test_throttle_mixing();
+	test_throttle_needs_pedalling();
 #endif
 
 	printf("\n%d checks, %d failures\n", checks, failures);

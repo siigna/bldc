@@ -1,14 +1,5 @@
-### 7.01
+### 7.02
 #### TBD
-* Major IMU refactor, IMU DRDY support. See https://github.com/vedderb/bldc/pull/917
-* MT6835 encoder support: https://github.com/vedderb/bldc/pull/916
-* New kill switch modes.
-* Added crash_diag terminal command: https://github.com/vedderb/bldc/pull/877
-* LispBM:
-	* Improve stability when not using the image system
-	* Many new extensions and access to more configuration parameters.
-* Added PWM + ABI Inverted encoder mode.
-* App ADC coasting brake support.
 * App PAS fixes:
 	* The pedal sensor filter setting is now applied. It selected a low-pass that was configured to pass the input through unchanged.
 	* Cadence no longer loses accuracy as uptime grows. Pedal timing was taken as a difference of absolute float seconds.
@@ -44,7 +35,25 @@
 	* New LispBM extensions: app-pas-get-torque, app-pas-get-rider-power, app-pas-get-assist-power, app-pas-get-output and app-pas-get-flags.
 	* PAS cadence, torque, rider power, assist power, output and status flags added to COMM_GET_VALUES as mask bit 22, so VESC Tool can plot and log them.
 	* app_pas_get_current_target_rel() now reports the output in both PAS modes. It was only written when PAS was not the primary output, so it read zero in the mode where PAS drives the motor.
+* App PAS throttle mixing and further Cycle Analyst behaviour:
+	* Configurable mixing with a throttle: highest wins, which is what this firmware has always done, or throttle priority, which is what a Cycle Analyst does.
+	* PAS output is now combined with the throttle for every current based ADC control type. It was only combined for the five brake types, so with ADC_CTRL_TYPE_CURRENT and the plain reverse types the PAS app ran and contributed nothing.
+	* Optional requirement that the throttle only works while pedalling above a configured road speed, the Cycle Analyst MxThrotSpd behaviour.
+	* Support for bipolar torque sensors, which rest mid range and swing both ways to measure the left and right pedal separately, such as a Thun.
+	* A minimum rider power before the motor contributes anything, subtracted from the assist basis before the gain, as a Cycle Analyst applies its start level.
+	* app_pas_stop() now clears the exported current target in both modes. It was only cleared when PAS was not the primary output, which matters now that the throttle app reads it for every current control type.
 
+### 7.01
+#### TBD
+* Major IMU refactor, IMU DRDY support. See https://github.com/vedderb/bldc/pull/917
+* MT6835 encoder support: https://github.com/vedderb/bldc/pull/916
+* New kill switch modes.
+* Added crash_diag terminal command: https://github.com/vedderb/bldc/pull/877
+* LispBM:
+	* Improve stability when not using the image system
+	* Many new extensions and access to more configuration parameters.
+* Added PWM + ABI Inverted encoder mode.
+* App ADC coasting brake support.
 ### 7.00
 #### 2026-05-15
 * Configurable HFI reset ERPM.

@@ -1174,7 +1174,7 @@ Returns the pedal RPM measured by the PAS-app. If you want to implement your own
 
 | Platforms | Firmware |
 |---|---|
-| ESC | 7.01+ |
+| ESC | 7.02+ |
 
 ```clj
 (app-pas-get-torque)
@@ -1188,7 +1188,7 @@ Returns the crank torque in Nm measured by the PAS-app, after the zero offset, s
 
 | Platforms | Firmware |
 |---|---|
-| ESC | 7.01+ |
+| ESC | 7.02+ |
 
 ```clj
 (app-pas-get-rider-power)
@@ -1202,7 +1202,7 @@ Returns the rider power in watts, which is the crank torque times the actual ped
 
 | Platforms | Firmware |
 |---|---|
-| ESC | 7.01+ |
+| ESC | 7.02+ |
 
 ```clj
 (app-pas-get-assist-power)
@@ -1216,7 +1216,7 @@ Returns the motor power target in watts that the Proportional Power control type
 
 | Platforms | Firmware |
 |---|---|
-| ESC | 7.01+ |
+| ESC | 7.02+ |
 
 ```clj
 (app-pas-get-output)
@@ -1230,7 +1230,7 @@ Returns the relative current the PAS-app is commanding, from 0.0 to 1.0, after r
 
 | Platforms | Firmware |
 |---|---|
-| ESC | 7.01+ |
+| ESC | 7.02+ |
 
 ```clj
 (app-pas-get-flags)

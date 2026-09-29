@@ -715,6 +715,16 @@ typedef enum {
 	PAS_TORQUE_ADC_EXT8
 } pas_adc_ch;
 
+// How PAS output combines with a throttle, when both apps run
+typedef enum {
+	// Use whichever is asking for more, which is what this firmware has
+	// always done
+	PAS_THROTTLE_MAX = 0,
+	// Any throttle at all takes over and PAS is ignored, which is what a
+	// Cycle Analyst does
+	PAS_THROTTLE_PRIORITY
+} pas_throttle_mode;
+
 // Where the PAS brake input comes from
 typedef enum {
 	PAS_BRAKE_SRC_NONE = 0,
@@ -807,6 +817,10 @@ typedef struct {
 	float cadence_floor_rpm;
 	float start_timeout_s;
 	float stop_timeout_s;
+	bool torque_bipolar;
+	float assist_start_w;
+	pas_throttle_mode throttle_mode;
+	float throttle_no_pedal_kmh;
 } pas_config;
 
 // NRF Datatypes

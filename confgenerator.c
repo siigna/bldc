@@ -341,6 +341,10 @@ int32_t confgenerator_serialize_appconf(uint8_t *buffer, const app_configuration
 	buffer_append_float16(buffer, conf->app_pas_conf.cadence_floor_rpm, 10, &ind);
 	buffer_append_float16(buffer, conf->app_pas_conf.start_timeout_s, 1000, &ind);
 	buffer_append_float16(buffer, conf->app_pas_conf.stop_timeout_s, 1000, &ind);
+	buffer[ind++] = conf->app_pas_conf.torque_bipolar;
+	buffer_append_float16(buffer, conf->app_pas_conf.assist_start_w, 1, &ind);
+	buffer[ind++] = conf->app_pas_conf.throttle_mode;
+	buffer_append_float16(buffer, conf->app_pas_conf.throttle_no_pedal_kmh, 10, &ind);
 	buffer[ind++] = conf->imu_conf.type;
 	buffer[ind++] = conf->imu_conf.mode;
 	buffer[ind++] = conf->imu_conf.filter;
@@ -709,6 +713,10 @@ bool confgenerator_deserialize_appconf(const uint8_t *buffer, app_configuration 
 	conf->app_pas_conf.cadence_floor_rpm = buffer_get_float16(buffer, 10, &ind);
 	conf->app_pas_conf.start_timeout_s = buffer_get_float16(buffer, 1000, &ind);
 	conf->app_pas_conf.stop_timeout_s = buffer_get_float16(buffer, 1000, &ind);
+	conf->app_pas_conf.torque_bipolar = buffer[ind++];
+	conf->app_pas_conf.assist_start_w = buffer_get_float16(buffer, 1, &ind);
+	conf->app_pas_conf.throttle_mode = buffer[ind++];
+	conf->app_pas_conf.throttle_no_pedal_kmh = buffer_get_float16(buffer, 10, &ind);
 	conf->imu_conf.type = buffer[ind++];
 	conf->imu_conf.mode = buffer[ind++];
 	conf->imu_conf.filter = buffer[ind++];
@@ -1061,6 +1069,10 @@ void confgenerator_set_defaults_appconf(app_configuration *conf) {
 	conf->app_pas_conf.cadence_floor_rpm = APPCONF_PAS_CADENCE_FLOOR_RPM;
 	conf->app_pas_conf.start_timeout_s = APPCONF_PAS_START_TIMEOUT_S;
 	conf->app_pas_conf.stop_timeout_s = APPCONF_PAS_STOP_TIMEOUT_S;
+	conf->app_pas_conf.torque_bipolar = APPCONF_PAS_TORQUE_BIPOLAR;
+	conf->app_pas_conf.assist_start_w = APPCONF_PAS_ASSIST_START_W;
+	conf->app_pas_conf.throttle_mode = APPCONF_PAS_THROTTLE_MODE;
+	conf->app_pas_conf.throttle_no_pedal_kmh = APPCONF_PAS_THROTTLE_NO_PEDAL_KMH;
 	conf->imu_conf.type = APPCONF_IMU_TYPE;
 	conf->imu_conf.mode = APPCONF_IMU_AHRS_MODE;
 	conf->imu_conf.filter = APPCONF_IMU_FILTER;

@@ -89,6 +89,8 @@ float app_pas_get_rider_power(void);
 float app_pas_get_assist_basis_power(void);
 float app_pas_get_speed_taper(void);
 int app_pas_get_flags(void);
+float app_pas_apply_to_throttle(float throttle_rel);
+float pas_mix_throttle(float throttle_rel, float pas_rel);
 
 // Bits returned by app_pas_get_flags()
 #define PAS_FLAG_TORQUE_SATURATED		(1 << 0)

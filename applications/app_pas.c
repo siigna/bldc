@@ -281,9 +281,15 @@ float pas_read_torque_nm(void) {
 
 			float nm = (torque_filter_v - config.torque_zero_v) * config.torque_nm_per_v;
 
-			// Only forward pedal force assists. Backwards force reads as
-			// negative and is not a brake request.
-			if (nm < 0.0) {
+			if (config.torque_bipolar) {
+				// A sensor that rests mid-rail and swings both ways, measuring the
+				// left and right pedal separately. A Thun sits at 2.5 V and covers
+				// -200 to +200 Nm over 0.5 to 4.5 V. Both directions are pedal
+				// effort, so the magnitude is the torque.
+				nm = fabsf(nm);
+			} else if (nm < 0.0) {
+				// A unipolar sensor rests at the bottom of its range, so below the
+				// zero point is noise or backwards force, not a brake request.
 				nm = 0.0;
 			}
 
@@ -815,6 +821,21 @@ static void terminal_pas_status(int argc, const char **argv) {
 		commands_printf("Brake             : off");
 	}
 
+	commands_printf("Throttle mix      : %s",
+			config.throttle_mode == PAS_THROTTLE_PRIORITY ?
+				"throttle takes priority" : "whichever asks for more");
+	if (config.throttle_no_pedal_kmh > 0.01) {
+		commands_printf("Throttle needs pedalling above %.1f km/h",
+			(double)config.throttle_no_pedal_kmh);
+	}
+	if (config.assist_start_w > 0.01) {
+		commands_printf("Assist start      : %.0f W of rider power before assist",
+			(double)config.assist_start_w);
+	}
+	if (config.torque_source == PAS_TORQUE_SRC_ADC && config.torque_bipolar) {
+		commands_printf("Torque sensor     : bipolar, magnitude either side of zero");
+	}
+
 	if (sensor_type_unsupported) {
 		commands_printf("WARNING: sensor type %d is not supported, no cadence is decoded.",
 				(int)config.sensor_type);
@@ -880,11 +901,13 @@ void app_pas_stop(void) {
 	terminal_unregister_callback(terminal_pas_torque);
 	terminal_unregister_callback(terminal_pas_preset);
 
+	// Cleared in both modes. It was only cleared when PAS was not the primary
+	// output, and now that the throttle app reads it for every current control
+	// type a stale value could survive into a later throttle-only session.
+	output_current_rel = 0.0;
+
 	if (primary_output == true) {
 		mc_interface_set_current_rel(0.0);
-	}
-	else {
-		output_current_rel = 0.0;
 	}
 }
 
@@ -1122,6 +1145,50 @@ void pas_event_handler(void) {
 }
 
 /**
+ * Combine a throttle request with the PAS output.
+ *
+ * Called by the throttle app when both are running, so that the policy lives
+ * with the configuration that selects it. Returns the throttle request
+ * unchanged when PAS is not running.
+ *
+ * Two policies, because both are defensible. Taking whichever asks for more is
+ * what this firmware has always done, and means a throttle can only ever add.
+ * Giving the throttle priority is what a Cycle Analyst does, where "if throttle
+ * is applied even a small amount while pedaling, PAS assist is ignored and the
+ * throttle alone determines the output". That is more predictable, at the cost
+ * that a throttle brushed by a knee can reduce assist.
+ */
+float pas_mix_throttle(float throttle_rel, float pas_rel) {
+	// Above a configured road speed the throttle only works while pedalling,
+	// which is the Cycle Analyst MxThrotSpd behaviour. Zero disables the check
+	// here, rather than meaning "always require pedalling" as it does on a Cycle
+	// Analyst, so that the default leaves an existing throttle working.
+	if (config.throttle_no_pedal_kmh > 0.01 &&
+			(mc_interface_get_speed() * 3.6) > config.throttle_no_pedal_kmh &&
+			pedal_rpm < 0.01) {
+		throttle_rel = 0.0;
+	}
+
+	switch (config.throttle_mode) {
+		case PAS_THROTTLE_PRIORITY:
+			// A small amount of throttle is enough to take over, so the handover
+			// does not depend on how far the lever has travelled.
+			return fabsf(throttle_rel) > 0.01 ? throttle_rel : pas_rel;
+
+		default:
+			return utils_max_abs(throttle_rel, pas_rel);
+	}
+}
+
+float app_pas_apply_to_throttle(float throttle_rel) {
+	if (!is_running) {
+		return throttle_rel;
+	}
+
+	return pas_mix_throttle(throttle_rel, output_current_rel);
+}
+
+/**
  * Compute the relative current output for the configured control type.
  *
  * Separated from the thread so that the assist law is reachable without one,
@@ -1212,7 +1279,16 @@ float pas_compute_output(float dt_ms) {
 			// Reported from the real cadence, assisted from the floored one.
 			rider_power_w = pas_power_w(control_nm, pedal_rpm);
 			assist_basis_w = pas_power_w(control_nm, pas_assist_cadence());
-			motor_power_w = assist_basis_w * config.assist_gain;
+			// A minimum rider effort before the motor contributes anything,
+			// subtracted from the basis before the gain, which is how a Cycle
+			// Analyst applies its start level. A power threshold rather than the
+			// torque deadband, so it demands actual effort rather than tripping
+			// on a constant force at any cadence.
+			float basis = assist_basis_w - config.assist_start_w;
+			if (basis < 0.0) {
+				basis = 0.0;
+			}
+			motor_power_w = basis * config.assist_gain;
 
 			output = pas_power_to_current_rel(motor_power_w);
 			utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
