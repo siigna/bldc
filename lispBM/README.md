@@ -558,6 +558,22 @@ Note: The AUX output mode must be set to Unused in Motor Settings->General->Adva
 
 ---
 
+#### get-aux
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(get-aux port)
+```
+
+Returns true when the given auxiliary output is on, where `port` is 1 or 2. This reads the output pin, so it reflects whatever is driving it: the Auxiliary Output Mode in the motor configuration, which is how a cooling fan is usually switched, or [set-aux](#set-aux).
+
+A board that has no auxiliary output, or drives one through something other than a plain GPIO, reads as off.
+
+---
+
 #### get-imu-rpy
 
 | Platforms | Firmware |
@@ -1460,6 +1476,20 @@ Run FOC in open loop in phase mode. Phase is the electrical position of the open
 ```
 
 Set kill switch state. When state is set to 1 the motor is disabled and optionally braking if timeout_brake_current is greater than 0. The kill switch overrides all other inputs and can be used as an emergency stop. The kill switch state here is applied as logic OR with the app settings kill switch input, so as long as any of them is active the motor will be disabled.
+
+---
+
+#### get-kill-sw
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(get-kill-sw)
+```
+
+Returns true when the kill switch is active, meaning the motor is being held at the timeout brake current regardless of any input. Reflects whichever source the kill switch mode selects, including one asserted from LispBM with [set-kill-sw](#set-kill-sw).
 
 ---
 

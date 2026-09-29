@@ -236,6 +236,25 @@
 #define CURR3_DOUBLE_SAMPLE		0
 #endif
 
+// Reading back the aux outputs. Derived from the same pins the ON and OFF
+// macros use, which covers every board that drives aux as a plain GPIO. A board
+// that drives it some other way, or has no aux at all, reads as off.
+#ifndef AUX_READ
+#ifdef AUX_GPIO
+#define AUX_READ()				(palReadPad(AUX_GPIO, AUX_PIN) ? 1 : 0)
+#else
+#define AUX_READ()				0
+#endif
+#endif
+
+#ifndef AUX2_READ
+#ifdef AUX2_GPIO
+#define AUX2_READ()				(palReadPad(AUX2_GPIO, AUX2_PIN) ? 1 : 0)
+#else
+#define AUX2_READ()				0
+#endif
+#endif
+
 #ifndef AUX_ON
 #define AUX_ON()
 #endif

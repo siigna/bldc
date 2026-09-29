@@ -42,6 +42,8 @@
 	* Support for bipolar torque sensors, which rest mid range and swing both ways to measure the left and right pedal separately, such as a Thun.
 	* A minimum rider power before the motor contributes anything, subtracted from the assist basis before the gain, as a Cycle Analyst applies its start level.
 	* app_pas_stop() now clears the exported current target in both modes. It was only cleared when PAS was not the primary output, which matters now that the throttle app reads it for every current control type.
+* Added get-kill-sw, so the kill switch state can be read and not only set.
+* Added get-aux, which reads back an auxiliary output. That is how a cooling fan switched by the Auxiliary Output Mode can be reported. Derived from the same pins the existing AUX_ON and AUX_OFF macros use, so it covers every board that drives aux as a plain GPIO.
 * App PAS closed loop power control:
 	* Proportional Power can now trim its request against measured input power, which is what a Cycle Analyst does with its power PID. Open loop remains the default.
 	* The open loop estimate is kept as a feedforward term and the gain only corrects the residual, so it can be small and the sluggish startup a Cycle Analyst gets from too low a power gain does not arise.

@@ -1248,6 +1248,20 @@ static lbm_value ext_secs_since(lbm_value *args, lbm_uint argn) {
 	return lbm_enc_float(UTILS_AGE_S(lbm_dec_as_u32(args[0])));
 }
 
+static lbm_value ext_get_aux(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN_NUMBER(1);
+
+	int port = lbm_dec_as_u32(args[0]);
+
+	if (port == 1) {
+		return AUX_READ() ? ENC_SYM_TRUE : ENC_SYM_NIL;
+	} else if (port == 2) {
+		return AUX2_READ() ? ENC_SYM_TRUE : ENC_SYM_NIL;
+	}
+
+	return ENC_SYM_TERROR;
+}
+
 static lbm_value ext_set_aux(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_ARGN_NUMBER(2);
 
@@ -2047,6 +2061,11 @@ static lbm_value ext_set_kill_sw(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_ARGN_NUMBER(1);
 	timeout_set_kill_sw_ext(lbm_dec_as_i32(args[0]) > 0);
 	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_get_kill_sw(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return timeout_kill_sw_active() ? ENC_SYM_TRUE : ENC_SYM_NIL;
 }
 
 static lbm_value ext_foc_beep(lbm_value *args, lbm_uint argn) {
@@ -6634,6 +6653,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("systime", ext_systime);
 		lbm_add_extension("secs-since", ext_secs_since);
 		lbm_add_extension("set-aux", ext_set_aux);
+		lbm_add_extension("get-aux", ext_get_aux);
 		lbm_add_extension("event-enable", ext_enable_event);
 		lbm_add_extension("get-imu-rpy", ext_get_imu_rpy);
 		lbm_add_extension("get-imu-quat", ext_get_imu_quat);
@@ -6698,6 +6718,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("foc-openloop-phase", ext_foc_openloop_phase);
 //		lbm_add_extension("foc-set-fw-override", ext_foc_set_fw_override);
 		lbm_add_extension("set-kill-sw", ext_set_kill_sw);
+		lbm_add_extension("get-kill-sw", ext_get_kill_sw);
 
 		lbm_add_extension("foc-beep", ext_foc_beep);
 		lbm_add_extension("foc-play-tone", ext_foc_play_tone);
