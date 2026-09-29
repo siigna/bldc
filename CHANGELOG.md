@@ -40,6 +40,10 @@
 	* Separate start and stop thresholds for pedalling detection, in seconds. These are tuned in opposite directions, so the single derived period the app used before could not serve both. Zero derives the old value, which for a low pole count sensor is a much longer cutoff than is wanted.
 	* A cadence floor for the assist calculation in Proportional Power, defaulting to 55 rpm. Power is torque times cadence, which collapses as the cranks slow, so without a floor there is the least assist when pulling away from a standstill.
 	* Reported rider power now uses the real cadence while the assist uses the floored one, so telemetry does not overstate what the rider is contributing.
+* App PAS telemetry:
+	* New LispBM extensions: app-pas-get-torque, app-pas-get-rider-power, app-pas-get-assist-power, app-pas-get-output and app-pas-get-flags.
+	* PAS cadence, torque, rider power, assist power, output and status flags added to COMM_GET_VALUES as mask bit 22, so VESC Tool can plot and log them.
+	* app_pas_get_current_target_rel() now reports the output in both PAS modes. It was only written when PAS was not the primary output, so it read zero in the mode where PAS drives the motor.
 
 ### 7.00
 #### 2026-05-15

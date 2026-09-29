@@ -87,6 +87,18 @@ bool app_pas_torque_saturated(void);
 bool app_pas_torque_ch_invalid(void);
 float app_pas_get_rider_power(void);
 float app_pas_get_assist_basis_power(void);
+float app_pas_get_speed_taper(void);
+int app_pas_get_flags(void);
+
+// Bits returned by app_pas_get_flags()
+#define PAS_FLAG_TORQUE_SATURATED		(1 << 0)
+#define PAS_FLAG_TORQUE_CH_INVALID		(1 << 1)
+#define PAS_FLAG_BRAKE_CH_INVALID		(1 << 2)
+#define PAS_FLAG_BRAKE_ENGAGED			(1 << 3)
+#define PAS_FLAG_PINS_UNAVAILABLE		(1 << 4)
+#define PAS_FLAG_SENSOR_UNSUPPORTED		(1 << 5)
+#define PAS_FLAG_TORQUE_SRC_UNSUPPORTED	(1 << 6)
+#define PAS_FLAG_SPEED_LIMITED			(1 << 7)
 float app_pas_get_motor_power_target(void);
 void app_pas_set_current_sub_scaling(float current_sub_scaling);
 

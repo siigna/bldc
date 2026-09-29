@@ -477,6 +477,16 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 			status |= timeout_kill_sw_active() << 1;
 			send_buffer[ind++] = status;
 		}
+		if (mask & ((uint32_t)1 << 22)) {
+			// PAS. Appended, so a tool that does not know about these fields
+			// simply stops reading before them.
+			buffer_append_float16(send_buffer, app_pas_get_pedal_rpm(), 1e1, &ind);
+			buffer_append_float16(send_buffer, app_pas_get_torque_nm(), 1e1, &ind);
+			buffer_append_float16(send_buffer, app_pas_get_rider_power(), 1e0, &ind);
+			buffer_append_float16(send_buffer, app_pas_get_motor_power_target(), 1e0, &ind);
+			buffer_append_float16(send_buffer, app_pas_get_current_target_rel(), 1e3, &ind);
+			send_buffer[ind++] = app_pas_get_flags();
+		}
 
 		reply_func(send_buffer, ind);
 		mempools_free_packet_buffer(send_buffer);

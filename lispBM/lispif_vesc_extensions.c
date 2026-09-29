@@ -1894,6 +1894,31 @@ static lbm_value ext_app_pas_get_rpm(lbm_value *args, lbm_uint argn) {
 	return lbm_enc_float(app_pas_get_pedal_rpm());
 }
 
+static lbm_value ext_app_pas_get_torque(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_torque_nm());
+}
+
+static lbm_value ext_app_pas_get_rider_power(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_rider_power());
+}
+
+static lbm_value ext_app_pas_get_assist_power(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_motor_power_target());
+}
+
+static lbm_value ext_app_pas_get_output(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_current_target_rel());
+}
+
+static lbm_value ext_app_pas_get_flags(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_i(app_pas_get_flags());
+}
+
 // Motor set commands
 
 static lbm_value ext_set_current(lbm_value *args, lbm_uint argn) {
@@ -6630,6 +6655,11 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("app-disable-output", ext_app_disable_output);
 		lbm_add_extension("app-is-output-disabled", ext_app_is_output_disabled);
 		lbm_add_extension("app-pas-get-rpm", ext_app_pas_get_rpm);
+		lbm_add_extension("app-pas-get-torque", ext_app_pas_get_torque);
+		lbm_add_extension("app-pas-get-rider-power", ext_app_pas_get_rider_power);
+		lbm_add_extension("app-pas-get-assist-power", ext_app_pas_get_assist_power);
+		lbm_add_extension("app-pas-get-output", ext_app_pas_get_output);
+		lbm_add_extension("app-pas-get-flags", ext_app_pas_get_flags);
 
 		// Motor set commands
 		lbm_add_extension("set-current", ext_set_current);

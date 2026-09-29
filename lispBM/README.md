@@ -1170,6 +1170,87 @@ Returns the pedal RPM measured by the PAS-app. If you want to implement your own
 
 ---
 
+#### app-pas-get-torque
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.01+ |
+
+```clj
+(app-pas-get-torque)
+```
+
+Returns the crank torque in Nm measured by the PAS-app, after the zero offset, scale, deadband and limits have been applied. Zero if no torque source is configured.
+
+---
+
+#### app-pas-get-rider-power
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.01+ |
+
+```clj
+(app-pas-get-rider-power)
+```
+
+Returns the rider power in watts, which is the crank torque times the actual pedal cadence. Note that the Proportional Power control type computes its assist from a floored cadence instead, so this is what the rider is contributing rather than what the assist is based on. See [app-pas-get-assist-power](#app-pas-get-assist-power).
+
+---
+
+#### app-pas-get-assist-power
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.01+ |
+
+```clj
+(app-pas-get-assist-power)
+```
+
+Returns the motor power target in watts that the Proportional Power control type is asking for, before it is converted to a current and before the current limits apply. Zero for the other control types.
+
+---
+
+#### app-pas-get-output
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.01+ |
+
+```clj
+(app-pas-get-output)
+```
+
+Returns the relative current the PAS-app is commanding, from 0.0 to 1.0, after ramping and all limits. This is the same value the ADC-app reads when both apps are running.
+
+---
+
+#### app-pas-get-flags
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.01+ |
+
+```clj
+(app-pas-get-flags)
+```
+
+Returns a bitfield of conditions in the PAS-app that are worth reporting:
+
+| Bit | Meaning |
+|---|---|
+| 0 | The torque sensor reading is at or above the ADC reference, so torque above that point cannot be measured |
+| 1 | The configured torque ADC channel does not exist on this hardware |
+| 2 | The configured brake ADC channel does not exist on this hardware |
+| 3 | The brake is applied |
+| 4 | The pedal sensor pins could not be claimed, so there is no cadence input |
+| 5 | The configured sensor type is not supported |
+| 6 | The hardware torque source is selected but this board does not implement one |
+| 7 | Assist is being reduced by the road speed taper |
+
+---
+
 ### Motor Set Commands
 
 ---

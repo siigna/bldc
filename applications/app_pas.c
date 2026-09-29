@@ -924,6 +924,45 @@ float app_pas_get_assist_basis_power(void) {
 	return assist_basis_w;
 }
 
+/**
+ * Conditions worth surfacing, as a bitfield, so that a display or a script can
+ * report them without needing an accessor for each one.
+ */
+int app_pas_get_flags(void) {
+	int flags = 0;
+
+	if (torque_saturated) {
+		flags |= PAS_FLAG_TORQUE_SATURATED;
+	}
+	if (torque_ch_invalid) {
+		flags |= PAS_FLAG_TORQUE_CH_INVALID;
+	}
+	if (brake_ch_invalid) {
+		flags |= PAS_FLAG_BRAKE_CH_INVALID;
+	}
+	if (brake_engaged) {
+		flags |= PAS_FLAG_BRAKE_ENGAGED;
+	}
+	if (pins_unavailable) {
+		flags |= PAS_FLAG_PINS_UNAVAILABLE;
+	}
+	if (sensor_type_unsupported) {
+		flags |= PAS_FLAG_SENSOR_UNSUPPORTED;
+	}
+	if (torque_src_unsupported) {
+		flags |= PAS_FLAG_TORQUE_SRC_UNSUPPORTED;
+	}
+	if (speed_taper < 0.999) {
+		flags |= PAS_FLAG_SPEED_LIMITED;
+	}
+
+	return flags;
+}
+
+float app_pas_get_speed_taper(void) {
+	return speed_taper;
+}
+
 float app_pas_get_motor_power_target(void) {
 	return motor_power_w;
 }
@@ -1283,11 +1322,13 @@ static THD_FUNCTION(pas_thread, arg) {
 		// Reset timeout
 		timeout_reset();
 
+		// Recorded in both modes so that it can be read back as telemetry. It was
+		// previously only written when PAS was not the primary output, so the
+		// getter returned zero in the mode where PAS drives the motor.
+		output_current_rel = output;
+
 		if (primary_output == true) {
 			mc_interface_set_current_rel(output);
-		}
-		else {
-			output_current_rel = output;
 		}
 	}
 }
