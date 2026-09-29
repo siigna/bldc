@@ -4426,6 +4426,16 @@ The following selection of app and motor parameters can be read and set from Lis
 'adc-coast-brake-level  ; Brake to apply when coasting (Added in FW 7.01)
 'adc-coast-brake-ramp-time ; Time to ramp up coasting brake in seconds (Added in FW 7.01)
 'pas-current-scaling    ; PAS current scaling (Added in FW 6.05)
+'pas-ctrl-type          ; PAS control type (Added in FW 7.02)
+'pas-magnets            ; Pulses per crank revolution (Added in FW 7.02)
+'pas-start-timeout-s    ; Pedalling start threshold (Added in FW 7.02)
+'pas-stop-timeout-s     ; Pedalling stop threshold (Added in FW 7.02)
+'pas-torque-zero-v      ; Torque sensor zero voltage (Added in FW 7.02)
+'pas-torque-nm-per-v    ; Torque sensor scale (Added in FW 7.02)
+'pas-assist-gain        ; Motor watts per rider watt (Added in FW 7.02)
+'pas-taper-start-kmh    ; Speed taper start (Added in FW 7.02)
+'pas-taper-end-kmh      ; Speed taper end (Added in FW 7.02)
+'pas-power-max-w        ; PAS power cap (Added in FW 7.02)
 
 ; VESC Remote App (Added in firmware 7.00)
 'vr-ctrl-type           ; Control Type
