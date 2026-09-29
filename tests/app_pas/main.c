@@ -22,6 +22,7 @@ mc_fault_code test_fault = FAULT_CODE_NONE;
 float test_current_rel = 0.0;
 volatile uint16_t ADC_Value[16] = {0};
 float test_v_in = 50.0;
+float test_speed = 0.0;
 mc_configuration test_mcconf;
 
 // Stubs for the rest of the firmware that app_pas.c calls.
@@ -34,6 +35,16 @@ void terminal_register_command_callback(const char *command, const char *help,
 	(void)command; (void)help; (void)arg_names; (void)cbf;
 }
 void terminal_unregister_callback(void(*cbf)(int argc, const char **argv)) { (void)cbf; }
+
+// The preset command writes the configuration. Recorded rather than performed.
+static app_configuration test_appconf_scratch;
+app_configuration *mempools_alloc_appconf(void) { return &test_appconf_scratch; }
+void mempools_free_appconf(app_configuration *p) { (void)p; }
+bool conf_general_store_app_configuration(app_configuration *c) {
+	test_appconf = *c;
+	return true;
+}
+void app_set_configuration(app_configuration *c) { test_appconf = *c; }
 #ifdef TEST_TORQUE_SENSOR
 float test_torque = 0.0;
 float hw_get_PAS_torque(void) { return test_torque; }
@@ -166,6 +177,14 @@ static void pulse_single_wire(float rpm, int magnets_count) {
 		test_pad[0] = 1;
 		pas_event_handler();
 	}
+}
+
+// The ramp is part of the output path, so tests that are not about the ramp
+// disable it and read the control law directly. Zero is below the threshold the
+// firmware uses to apply a ramp at all.
+static void ramp_off(pas_config *c) {
+	c->ramp_time_pos = 0.0;
+	c->ramp_time_neg = 0.0;
 }
 
 static pas_config base_config(void) {
@@ -1083,6 +1102,314 @@ static void test_torque_averaging_smooths(void) {
 			"a one revolution window at least halves the variation through the stroke");
 }
 
+// Cadence control at a known cadence, with the ramp out of the way, as a
+// baseline the limits can be measured against.
+static float cadence_output(pas_config *c) {
+	setup(c);
+	pedal(50.0, 12);
+	float out = 0.0;
+	for (int i = 0; i < 10; i++) {
+		out = pas_compute_output(2.0);
+	}
+	return out;
+}
+
+static void test_speed_taper(void) {
+	printf("speed taper\n");
+	pas_config c = base_config();
+	ramp_off(&c);
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	c.current_scaling = 1.0;
+	c.pedal_rpm_start = 10.0;
+	c.pedal_rpm_end = 100.0;
+
+	// Taper off: speed makes no difference.
+	c.taper_start_kmh = 0.0;
+	c.taper_end_kmh = 0.0;
+	test_speed = 0.0;
+	float unlimited = cadence_output(&c);
+	test_speed = 30.0 / 3.6;
+	check_near(cadence_output(&c), unlimited, 0.001, "no taper configured means no limiting");
+
+	// Tapering from 20 to 25 km/h.
+	c.taper_start_kmh = 20.0;
+	c.taper_end_kmh = 25.0;
+
+	test_speed = 10.0 / 3.6;
+	check_near(cadence_output(&c), unlimited, 0.001, "full assist below the taper start");
+
+	test_speed = 20.0 / 3.6;
+	check_near(cadence_output(&c), unlimited, 0.001, "full assist at the taper start");
+
+	test_speed = 22.5 / 3.6;
+	check_near(cadence_output(&c), unlimited * 0.5f, unlimited * 0.02f,
+			"half assist half way through the taper");
+
+	test_speed = 25.0 / 3.6;
+	check_near(cadence_output(&c), 0.0, 0.001, "no assist at the taper end");
+
+	test_speed = 40.0 / 3.6;
+	check_near(cadence_output(&c), 0.0, 0.001, "no assist above the taper end");
+
+	test_speed = 0.0;
+}
+
+// Setting the two speeds equal is how a hard cutoff is expressed, which is what
+// the pedelec preset uses.
+static void test_speed_cutoff(void) {
+	printf("speed cutoff\n");
+	pas_config c = base_config();
+	ramp_off(&c);
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	c.current_scaling = 1.0;
+	c.pedal_rpm_start = 10.0;
+	c.pedal_rpm_end = 100.0;
+	c.taper_start_kmh = 25.0;
+	c.taper_end_kmh = 25.0;
+
+	test_speed = 24.0 / 3.6;
+	float below = cadence_output(&c);
+	check(below > 0.0, "assist just below the cutoff");
+
+	test_speed = 25.5 / 3.6;
+	check_near(cadence_output(&c), 0.0, 0.001, "no assist just above the cutoff");
+
+	// An end below the start is the same thing rather than an inverted taper.
+	c.taper_start_kmh = 25.0;
+	c.taper_end_kmh = 10.0;
+	test_speed = 24.0 / 3.6;
+	check(cadence_output(&c) > 0.0, "an end below the start still assists below the start");
+	test_speed = 26.0 / 3.6;
+	check_near(cadence_output(&c), 0.0, 0.001, "and cuts off above it");
+
+	test_speed = 0.0;
+}
+
+// The cap is on watts and has to bite whatever the control type is, not only
+// the one that works in watts.
+static void test_power_cap(void) {
+	printf("power cap\n");
+	pas_config c = base_config();
+	ramp_off(&c);
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	c.current_scaling = 1.0;
+	c.pedal_rpm_start = 10.0;
+	c.pedal_rpm_end = 60.0;
+
+	test_v_in = 50.0;
+	test_mcconf.lo_current_max = 100.0;
+
+	c.power_max_w = 0.0;
+	float uncapped = cadence_output(&c);
+	check(uncapped > 0.5, "cadence control at full scale without a cap");
+
+	// 250 W of 5000 W full scale is 0.05 relative.
+	c.power_max_w = 250.0;
+	check_near(cadence_output(&c), 0.05, 0.001, "the cap applies to cadence control");
+
+	// The cap is in watts, so halving the voltage doubles the relative current
+	// it allows.
+	test_v_in = 25.0;
+	check_near(cadence_output(&c), 0.10, 0.001, "the cap tracks the input voltage");
+
+	// A cap above what is available changes nothing.
+	test_v_in = 50.0;
+	c.power_max_w = 100000.0;
+	check_near(cadence_output(&c), uncapped, 0.001, "a cap above full scale does not limit");
+
+	test_v_in = 50.0;
+}
+
+// A hard pedal stop ends assist with the pedalling instead of fading out over
+// the negative ramp time.
+static void test_pedal_stop_hard(void) {
+	printf("hard pedal stop\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	c.current_scaling = 1.0;
+	c.pedal_rpm_start = 10.0;
+	c.pedal_rpm_end = 100.0;
+	// A ramp long enough that the difference is unmistakable.
+	c.ramp_time_pos = 0.2;
+	c.ramp_time_neg = 2.0;
+
+	// Ramping down: still assisting shortly after the cranks stop.
+	c.pedal_stop_hard = false;
+	setup(&c);
+	pedal(50.0, 12);
+	for (int i = 0; i < 400; i++) {
+		pas_compute_output(2.0);
+	}
+	float running = pas_compute_output(2.0);
+	check(running > 0.0, "assisting while pedalling");
+
+	for (int i = 0; i < 100; i++) {
+		test_now += 100;
+		pas_event_handler();
+	}
+	float after_ramp = pas_compute_output(2.0);
+	check(after_ramp > 0.0, "still assisting just after the cranks stop when ramping");
+
+	// Hard cut: nothing, immediately.
+	c.pedal_stop_hard = true;
+	setup(&c);
+	pedal(50.0, 12);
+	for (int i = 0; i < 400; i++) {
+		pas_compute_output(2.0);
+	}
+	check(pas_compute_output(2.0) > 0.0, "assisting while pedalling with hard stop set");
+
+	for (int i = 0; i < 100; i++) {
+		test_now += 100;
+		pas_event_handler();
+	}
+	check_near(pas_compute_output(2.0), 0.0, 0.001,
+			"no assist immediately after the cranks stop with hard stop set");
+}
+
+static void test_brake(void) {
+	printf("brake\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	c.current_scaling = 1.0;
+	c.pedal_rpm_start = 10.0;
+	c.pedal_rpm_end = 100.0;
+	c.ramp_time_pos = 0.2;
+	c.ramp_time_neg = 2.0;
+	c.brake_source = PAS_BRAKE_SRC_ADC;
+	c.brake_adc_ch = PAS_TORQUE_ADC_EXT2;
+	c.brake_threshold_v = 1.65;
+	c.brake_invert = false;
+
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT2, 0.0);
+	pedal(50.0, 12);
+	for (int i = 0; i < 400; i++) {
+		pas_compute_output(2.0);
+	}
+	check(pas_compute_output(2.0) > 0.0, "assisting with the brake released");
+
+	// The brake cuts immediately, through the ramp rather than over it.
+	set_adc_volts(ADC_IND_EXT2, 3.0);
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "the brake cuts assist immediately");
+
+	// And releasing it does not restore the old ramp state in one step.
+	set_adc_volts(ADC_IND_EXT2, 0.0);
+	float resumed = pas_compute_output(2.0);
+	check(resumed >= 0.0 && resumed < 0.05,
+			"releasing the brake ramps back up rather than jumping");
+
+	// Below the threshold is released, above is applied.
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT2, 1.6);
+	pedal(50.0, 12);
+	for (int i = 0; i < 400; i++) {
+		pas_compute_output(2.0);
+	}
+	check(pas_compute_output(2.0) > 0.0, "just below the threshold is released");
+
+	set_adc_volts(ADC_IND_EXT2, 1.7);
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "just above the threshold is applied");
+}
+
+// A switch that pulls the input low when the brake is used.
+static void test_brake_inverted(void) {
+	printf("brake inverted\n");
+	pas_config c = base_config();
+	ramp_off(&c);
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	c.current_scaling = 1.0;
+	c.pedal_rpm_start = 10.0;
+	c.pedal_rpm_end = 100.0;
+	c.brake_source = PAS_BRAKE_SRC_ADC;
+	c.brake_adc_ch = PAS_TORQUE_ADC_EXT2;
+	c.brake_threshold_v = 1.65;
+	c.brake_invert = true;
+
+	set_adc_volts(ADC_IND_EXT2, 3.0);
+	check(cadence_output(&c) > 0.0, "high is released when inverted");
+
+	set_adc_volts(ADC_IND_EXT2, 0.0);
+	check_near(cadence_output(&c), 0.0, 0.001, "low is applied when inverted");
+}
+
+// As for the torque channel, a brake channel the hardware lacks must not fall
+// through to the first ADC channel.
+static void test_brake_channel_validation(void) {
+	printf("brake channel validation\n");
+	pas_config c = base_config();
+	ramp_off(&c);
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	c.current_scaling = 1.0;
+	c.pedal_rpm_start = 10.0;
+	c.pedal_rpm_end = 100.0;
+	c.brake_source = PAS_BRAKE_SRC_ADC;
+	c.brake_adc_ch = PAS_TORQUE_ADC_EXT6;
+	c.brake_threshold_v = 1.65;
+
+	// A voltage that would read as braking on the first channel.
+	set_adc_volts(ADC_IND_EXT, 3.0);
+
+	float out = cadence_output(&c);
+	check(out > 0.0, "an unavailable brake channel does not brake from another channel");
+}
+
+// The pedelec preset is a combination of the limits rather than a mode of its
+// own, so what matters is that the combination behaves as intended.
+static void test_pedelec_combination(void) {
+	printf("pedelec combination\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	c.current_scaling = 1.0;
+	c.pedal_rpm_start = 10.0;
+	c.pedal_rpm_end = 60.0;
+	c.ramp_time_pos = 0.2;
+	c.ramp_time_neg = 2.0;
+
+	// What "pas_preset pedelec store" sets.
+	c.taper_start_kmh = 25.0;
+	c.taper_end_kmh = 25.0;
+	c.power_max_w = 250.0;
+	c.pedal_stop_hard = true;
+
+	test_v_in = 50.0;
+	test_mcconf.lo_current_max = 100.0;
+
+	// Under way and pedalling: capped at 250 W of the 5000 W full scale.
+	test_speed = 20.0 / 3.6;
+	setup(&c);
+	pedal(50.0, 12);
+	float out = 0.0;
+	for (int i = 0; i < 400; i++) {
+		out = pas_compute_output(2.0);
+	}
+	check_near(out, 0.05, 0.002, "assist is capped at 250 W below the cutoff");
+
+	// Over the cutoff: nothing.
+	test_speed = 26.0 / 3.6;
+	setup(&c);
+	pedal(50.0, 12);
+	for (int i = 0; i < 400; i++) {
+		out = pas_compute_output(2.0);
+	}
+	check_near(out, 0.0, 0.001, "no assist above the cutoff");
+
+	// Pedalling stops: nothing, immediately.
+	test_speed = 20.0 / 3.6;
+	setup(&c);
+	pedal(50.0, 12);
+	for (int i = 0; i < 400; i++) {
+		pas_compute_output(2.0);
+	}
+	for (int i = 0; i < 100; i++) {
+		test_now += 100;
+		pas_event_handler();
+	}
+	check_near(pas_compute_output(2.0), 0.0, 0.001, "no assist once pedalling stops");
+
+	test_speed = 0.0;
+}
+
 int main(void) {
 	memset(&test_appconf, 0, sizeof(test_appconf));
 	memset(&test_mcconf, 0, sizeof(test_mcconf));
@@ -1134,6 +1461,14 @@ int main(void) {
 	test_torque_averaging();
 	test_averaging_reset_on_stop();
 	test_torque_averaging_smooths();
+	test_speed_taper();
+	test_speed_cutoff();
+	test_power_cap();
+	test_pedal_stop_hard();
+	test_brake();
+	test_brake_inverted();
+	test_brake_channel_validation();
+	test_pedelec_combination();
 #endif
 
 	printf("\n%d checks, %d failures\n", checks, failures);

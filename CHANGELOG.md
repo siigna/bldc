@@ -30,6 +30,12 @@
 	* Optional revolution synchronous torque averaging, over a configurable number of pedal pulses. Crank torque varies strongly within a pedal stroke, and averaging whole pulse intervals does not change character with cadence the way a time constant does.
 	* The power request is converted to current against the measured input voltage, which is floored so that a low reading cannot inflate the request.
 	* The previously unlisted fourth PAS control type is now named in VESC Tool. It behaves identically to Constant Torque.
+* App PAS limits:
+	* Road speed taper: full assist below a start speed, falling linearly to nothing at an end speed. Setting the two equal gives a hard cutoff.
+	* Power cap in watts, applied to every control type rather than only to Proportional Power.
+	* Optional hard cut when the cranks stop, instead of ramping down over the negative ramp time.
+	* Brake input on a configurable ADC channel with a threshold and optional inversion, which cuts assist immediately. The PAS app had no brake input at all, and in the combined ADC and PAS mode the two outputs are merged by taking the larger, so brake handling on the ADC side did not suppress PAS.
+	* Added the pas_preset terminal command, with a pedelec preset.
 
 ### 7.00
 #### 2026-05-15

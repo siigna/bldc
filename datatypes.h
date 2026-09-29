@@ -703,7 +703,7 @@ typedef enum {
 	PAS_TORQUE_SRC_ADC
 } pas_torque_source;
 
-// Which ADC channel an analog PAS torque sensor is on
+// Which ADC channel a PAS analog input is on
 typedef enum {
 	PAS_TORQUE_ADC_EXT1 = 0,
 	PAS_TORQUE_ADC_EXT2,
@@ -713,7 +713,13 @@ typedef enum {
 	PAS_TORQUE_ADC_EXT6,
 	PAS_TORQUE_ADC_EXT7,
 	PAS_TORQUE_ADC_EXT8
-} pas_torque_adc_ch;
+} pas_adc_ch;
+
+// Where the PAS brake input comes from
+typedef enum {
+	PAS_BRAKE_SRC_NONE = 0,
+	PAS_BRAKE_SRC_ADC
+} pas_brake_source;
 
 typedef struct {
 	adc_control_type ctrl_type;
@@ -783,13 +789,21 @@ typedef struct {
 	float ramp_time_neg;
 	uint32_t update_rate_hz;
 	pas_torque_source torque_source;
-	pas_torque_adc_ch torque_adc_ch;
+	pas_adc_ch torque_adc_ch;
 	float torque_zero_v;
 	float torque_nm_per_v;
 	float torque_max_nm;
 	float torque_deadband_nm;
 	float assist_gain;
 	uint16_t torque_avg_pulses;
+	float taper_start_kmh;
+	float taper_end_kmh;
+	float power_max_w;
+	bool pedal_stop_hard;
+	pas_brake_source brake_source;
+	pas_adc_ch brake_adc_ch;
+	float brake_threshold_v;
+	bool brake_invert;
 } pas_config;
 
 // NRF Datatypes

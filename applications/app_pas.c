@@ -31,6 +31,8 @@
 #include "utils_sys.h"
 #include "terminal.h"
 #include "commands.h"
+#include "conf_general.h"
+#include "mempools.h"
 #include "hw.h"
 #include <math.h>
 #include <string.h>
@@ -77,6 +79,9 @@ static volatile bool torque_src_unsupported = false;
 static float torque_filter_v = 0.0;
 static volatile float rider_power_w = 0.0;
 static volatile float motor_power_w = 0.0;
+static volatile bool brake_engaged = false;
+static volatile bool brake_ch_invalid = false;
+static volatile float speed_taper = 1.0;
 
 // Revolution synchronous torque averaging. A bottom bracket torque signal
 // varies strongly within a pedal stroke, so the mean over one pulse interval is
@@ -150,6 +155,9 @@ void app_pas_configure(pas_config *conf) {
 
 	rider_power_w = 0.0;
 	motor_power_w = 0.0;
+	brake_engaged = false;
+	brake_ch_invalid = false;
+	speed_taper = 1.0;
 	torque_ring_pos = 0;
 	torque_ring_fill = 0;
 	torque_pulse_sum = 0.0;
@@ -174,8 +182,8 @@ void app_pas_configure(pas_config *conf) {
  * does not define them, so testing with #ifdef is always true and would
  * silently read the throttle input. The values are compared instead.
  */
-static int pas_torque_adc_index(void) {
-	switch (config.torque_adc_ch) {
+static int pas_adc_index(pas_adc_ch sel) {
+	switch (sel) {
 		case PAS_TORQUE_ADC_EXT1:
 			return ADC_IND_EXT;
 #if ADC_IND_EXT2 != ADC_IND_EXT
@@ -233,7 +241,7 @@ float pas_read_torque_nm(void) {
 #endif
 
 		case PAS_TORQUE_SRC_ADC: {
-			int adc_ch = pas_torque_adc_index();
+			int adc_ch = pas_adc_index(config.torque_adc_ch);
 
 			if (adc_ch < 0) {
 				torque_ch_invalid = true;
@@ -385,6 +393,100 @@ static float pas_power_to_current_rel(float watts) {
 }
 
 /**
+ * Assist multiplier from road speed.
+ *
+ * Full assist up to taper_start_kmh, falling linearly to nothing at
+ * taper_end_kmh. Setting the two equal, or the end below the start, gives a
+ * hard cutoff at that speed. Both zero disables the taper.
+ *
+ * Speed comes from mc_interface_get_speed(), which is derived from motor RPM,
+ * si_motor_poles, si_wheel_diameter and si_gear_ratio unless the hardware has a
+ * wheel speed sensor. Those have to be right for this to mean anything.
+ */
+static float pas_speed_taper(void) {
+	if (config.taper_end_kmh <= 0.01 && config.taper_start_kmh <= 0.01) {
+		return 1.0;
+	}
+
+	const float kmh = mc_interface_get_speed() * 3.6;
+
+	if (kmh <= config.taper_start_kmh) {
+		return 1.0;
+	}
+
+	// A taper that does not span a range is a cutoff at the start speed.
+	if (config.taper_end_kmh <= (config.taper_start_kmh + 0.01)) {
+		return 0.0;
+	}
+
+	if (kmh >= config.taper_end_kmh) {
+		return 0.0;
+	}
+
+	float scale = utils_map(kmh, config.taper_start_kmh, config.taper_end_kmh, 1.0, 0.0);
+	utils_truncate_number(&scale, 0.0, 1.0);
+	return scale;
+}
+
+/**
+ * True when the brake is being applied.
+ *
+ * The threshold comparison covers a proportional lever and a plain switch
+ * alike, since a switch reads as one rail or the other, and brake_invert
+ * handles a switch that pulls low when applied.
+ */
+static bool pas_brake_active(void) {
+	if (config.brake_source != PAS_BRAKE_SRC_ADC) {
+		return false;
+	}
+
+	int adc_ch = pas_adc_index(config.brake_adc_ch);
+
+	if (adc_ch < 0) {
+		brake_ch_invalid = true;
+		return false;
+	}
+	brake_ch_invalid = false;
+
+	const bool over = ADC_VOLTS(adc_ch) >= config.brake_threshold_v;
+	return config.brake_invert ? !over : over;
+}
+
+/**
+ * Cap a relative current request so that it does not exceed a power limit.
+ *
+ * Applied to the relative current rather than inside the power control type, so
+ * that it limits every control type rather than only the one that works in
+ * watts.
+ */
+static float pas_apply_power_cap(float output) {
+	if (config.power_max_w <= 0.1) {
+		return output;
+	}
+
+	float v_in = mc_interface_get_input_voltage_filtered();
+
+	if (v_in < PAS_MIN_VIN) {
+		v_in = PAS_MIN_VIN;
+	}
+
+	const volatile mc_configuration *mcconf = mc_interface_get_configuration();
+	const float i_max = mcconf->lo_current_max;
+	const float full_scale_w = i_max * v_in;
+
+	if (full_scale_w < 1.0) {
+		return output;
+	}
+
+	const float max_rel = config.power_max_w / full_scale_w;
+
+	if (output > max_rel) {
+		return max_rel;
+	}
+	return output;
+}
+
+/**
  * True when the pedal sensor pins cannot be claimed.
  *
  * On hardware without dedicated PAS pins the fallback is the COMM UART pads.
@@ -414,6 +516,69 @@ static bool pas_pins_available(void) {
 #endif
 }
 
+// The well known numbers for an EU pedelec. Presented as a preset: setting
+// these does not make an installation compliant, which depends on the whole
+// vehicle and on how it is used.
+#define PEDELEC_CUTOFF_KMH		25.0
+#define PEDELEC_POWER_W			250.0
+
+static void terminal_pas_preset(int argc, const char **argv) {
+	if (argc < 2 || strcmp(argv[1], "pedelec") != 0) {
+		commands_printf("Usage: pas_preset pedelec [store]");
+		commands_printf("Prints the values the preset would set. Add \"store\" to write them.");
+		commands_printf(" ");
+		return;
+	}
+
+	const bool store = (argc >= 3 && strcmp(argv[2], "store") == 0);
+
+	commands_printf("Pedelec preset:");
+	commands_printf("  Speed cutoff      : %.0f km/h (taper start and end equal)",
+			(double)PEDELEC_CUTOFF_KMH);
+	commands_printf("  Power cap         : %.0f W", (double)PEDELEC_POWER_W);
+	commands_printf("  Pedal stop        : hard cut");
+	commands_printf(" ");
+	commands_printf("These are the well known numbers, not a statement that an installation");
+	commands_printf("is compliant. That depends on the whole vehicle and how it is used.");
+	commands_printf(" ");
+	commands_printf("Note that the speed cutoff is only as good as the speed reading, which");
+	commands_printf("comes from the motor RPM and the configured pole count, wheel diameter");
+	commands_printf("and gear ratio unless the hardware has a wheel speed sensor.");
+	commands_printf(" ");
+	commands_printf("There is no walk assist mode, so the preset sets no walk speed limit.");
+	commands_printf(" ");
+
+	if (!store) {
+		commands_printf("Not written. Add \"store\" to apply and save.");
+		commands_printf(" ");
+		return;
+	}
+
+	app_configuration *appconf = mempools_alloc_appconf();
+
+	if (appconf == 0) {
+		commands_printf("Could not allocate the configuration, nothing written.");
+		commands_printf(" ");
+		return;
+	}
+
+	*appconf = *app_get_configuration();
+	appconf->app_pas_conf.taper_start_kmh = PEDELEC_CUTOFF_KMH;
+	appconf->app_pas_conf.taper_end_kmh = PEDELEC_CUTOFF_KMH;
+	appconf->app_pas_conf.power_max_w = PEDELEC_POWER_W;
+	appconf->app_pas_conf.pedal_stop_hard = true;
+
+	if (conf_general_store_app_configuration(appconf)) {
+		app_set_configuration(appconf);
+		commands_printf("Written and applied.");
+	} else {
+		commands_printf("Writing the configuration failed, nothing changed.");
+	}
+
+	mempools_free_appconf(appconf);
+	commands_printf(" ");
+}
+
 static void terminal_pas_torque(int argc, const char **argv) {
 	if (config.torque_source != PAS_TORQUE_SRC_ADC) {
 		commands_printf("The torque source is not set to ADC, so there is nothing to read.");
@@ -421,7 +586,7 @@ static void terminal_pas_torque(int argc, const char **argv) {
 		return;
 	}
 
-	int adc_ch = pas_torque_adc_index();
+	int adc_ch = pas_adc_index(config.torque_adc_ch);
 	if (adc_ch < 0) {
 		commands_printf("ADC channel %d is not available on this hardware.",
 				(int)config.torque_adc_ch + 1);
@@ -561,6 +726,44 @@ static void terminal_pas_status(int argc, const char **argv) {
 		commands_printf("Torque averaging  : off");
 	}
 
+	if (config.taper_start_kmh > 0.01 || config.taper_end_kmh > 0.01) {
+		if (config.taper_end_kmh <= (config.taper_start_kmh + 0.01)) {
+			commands_printf("Speed limit       : hard cutoff at %.1f km/h",
+					(double)config.taper_start_kmh);
+		} else {
+			commands_printf("Speed limit       : full to %.1f km/h, zero at %.1f km/h",
+					(double)config.taper_start_kmh, (double)config.taper_end_kmh);
+		}
+		commands_printf("Speed             : %.1f km/h (taper %.2f)",
+				(double)(mc_interface_get_speed() * 3.6), (double)speed_taper);
+	} else {
+		commands_printf("Speed limit       : off");
+	}
+
+	if (config.power_max_w > 0.1) {
+		commands_printf("Power cap         : %.0f W", (double)config.power_max_w);
+	} else {
+		commands_printf("Power cap         : off");
+	}
+
+	commands_printf("Pedal stop        : %s",
+			config.pedal_stop_hard ? "hard cut" : "ramp down");
+
+	if (config.brake_source == PAS_BRAKE_SRC_ADC) {
+		int brake_ch = pas_adc_index(config.brake_adc_ch);
+		commands_printf("Brake             : ADC %d%s, threshold %.2f V%s, %s",
+				(int)config.brake_adc_ch + 1,
+				brake_ch < 0 ? " NOT AVAILABLE" : "",
+				(double)config.brake_threshold_v,
+				config.brake_invert ? " inverted" : "",
+				brake_engaged ? "APPLIED" : "released");
+		if (brake_ch >= 0) {
+			commands_printf("Brake voltage     : %.3f V", (double)ADC_VOLTS(brake_ch));
+		}
+	} else {
+		commands_printf("Brake             : off");
+	}
+
 	if (sensor_type_unsupported) {
 		commands_printf("WARNING: sensor type %d is not supported, no cadence is decoded.",
 				(int)config.sensor_type);
@@ -600,6 +803,12 @@ void app_pas_start(bool is_primary_output) {
 			terminal_pas_status);
 
 	terminal_register_command_callback(
+			"pas_preset",
+			"Apply a PAS preset. Currently \"pedelec\".",
+			"pedelec [store]",
+			terminal_pas_preset);
+
+	terminal_register_command_callback(
 			"pas_torque",
 			"Read the analog PAS torque sensor. Add \"zero\" to measure the zero point.",
 			"[zero]",
@@ -618,6 +827,7 @@ void app_pas_stop(void) {
 
 	terminal_unregister_callback(terminal_pas_status);
 	terminal_unregister_callback(terminal_pas_torque);
+	terminal_unregister_callback(terminal_pas_preset);
 
 	if (primary_output == true) {
 		mc_interface_set_current_rel(0.0);
@@ -913,6 +1123,38 @@ float pas_compute_output(float dt_ms) {
 		default:
 			break;
 	}
+	// Road speed taper, before the ramp so that the ramp smooths it.
+	speed_taper = pas_speed_taper();
+	output *= speed_taper;
+
+	// Power cap, on the relative current so that it limits every control type.
+	output = pas_apply_power_cap(output);
+
+	// Ramping.
+	float ramp_time = fabsf(output) > fabsf(out_ramp) ?
+			config.ramp_time_pos : config.ramp_time_neg;
+
+	if (ramp_time > 0.01) {
+		const float ramp_step = (dt_ms / 1000.0) / ramp_time;
+		utils_step_towards(&out_ramp, output, ramp_step);
+		utils_truncate_number(&out_ramp, 0.0, config.current_scaling * sub_scaling);
+		output = out_ramp;
+	}
+
+	// A hard pedal stop bypasses the ramp, for setups that want assist to end
+	// with the pedalling rather than fade out over ramp_time_neg.
+	if (config.pedal_stop_hard && pedal_rpm < 0.01) {
+		out_ramp = 0.0;
+		output = 0.0;
+	}
+
+	// The brake cuts assist immediately, after the ramp rather than through it.
+	brake_engaged = pas_brake_active();
+	if (brake_engaged) {
+		out_ramp = 0.0;
+		output = 0.0;
+	}
+
 	return output;
 }
 
@@ -940,12 +1182,6 @@ static THD_FUNCTION(pas_thread, arg) {
 
 		pas_event_handler();	// this could happen inside an ISR instead of being polled
 
-		// Recomputed every iteration: a control type that produces nothing, or an
-		// iteration that bails out early, must not leave a previous value latched
-		// to be ramped and applied.
-		float output = 0.0;
-
-
 		// For safe start when fault codes occur
 		if (mc_interface_get_fault() != FAULT_CODE_NONE) {
 			ms_without_power = 0;
@@ -960,24 +1196,15 @@ static THD_FUNCTION(pas_thread, arg) {
 			continue;
 		}
 
-		output = pas_compute_output((1000.0 * (float)sleep_time) / (float)CH_CFG_ST_FREQUENCY);
-
-		// Apply ramping
-		float ramp_time = fabsf(output) > fabsf(out_ramp) ? config.ramp_time_pos : config.ramp_time_neg;
-
-		// The elapsed time is taken every iteration. Taking it only inside the
-		// branch below let it grow without bound whenever the branch was skipped,
-		// so the first enabled iteration took one unbounded step.
-		const float dt = (float)ST2MS(chVTTimeElapsedSinceX(out_last_time)) / 1000.0;
+		// The elapsed time is taken every iteration. Taking it only where it was
+		// used let it grow without bound whenever that was skipped, so the first
+		// enabled iteration took one unbounded step.
+		const float dt_ms = (float)ST2MS(chVTTimeElapsedSinceX(out_last_time));
 		out_last_time = chVTGetSystemTimeX();
 
-		if (ramp_time > 0.01) {
-			const float ramp_step = dt / ramp_time;
-			utils_step_towards(&out_ramp, output, ramp_step);
-			utils_truncate_number(&out_ramp, 0.0, config.current_scaling * sub_scaling);
-
-			output = out_ramp;
-		}
+		// Computed fresh every iteration: a control type that produces nothing
+		// must not leave a previous value latched to be applied.
+		const float output = pas_compute_output(dt_ms);
 
 		if (output < 0.001) {
 			ms_without_power += (1000.0 * (float)sleep_time) / (float)CH_CFG_ST_FREQUENCY;

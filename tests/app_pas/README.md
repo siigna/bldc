@@ -42,6 +42,11 @@ below the zero point reads as no torque rather than negative, the deadband and
 its rescaling, the clamp to full scale, saturation reporting, rejection of an
 ADC channel the hardware lacks, and each torque source.
 
+Limits: the speed taper at both ends and half way through, the hard cutoff form,
+the power cap including that it applies to cadence control and tracks the input
+voltage, the hard pedal stop against the ramping behaviour, the brake including
+inversion and channel validation, and the pedelec combination as a whole.
+
 Assist law: rider power as torque times cadence, the gain, the conversion of
 watts to a relative current against the input voltage, the input voltage floor,
 the assist ceiling, and the torque averaging window including that it smooths
