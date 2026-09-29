@@ -322,6 +322,12 @@ int32_t confgenerator_serialize_appconf(uint8_t *buffer, const app_configuration
 	buffer_append_float16(buffer, conf->app_pas_conf.ramp_time_pos, 100, &ind);
 	buffer_append_float16(buffer, conf->app_pas_conf.ramp_time_neg, 100, &ind);
 	buffer_append_uint16(buffer, conf->app_pas_conf.update_rate_hz, &ind);
+	buffer[ind++] = conf->app_pas_conf.torque_source;
+	buffer[ind++] = conf->app_pas_conf.torque_adc_ch;
+	buffer_append_float16(buffer, conf->app_pas_conf.torque_zero_v, 1000, &ind);
+	buffer_append_float16(buffer, conf->app_pas_conf.torque_nm_per_v, 100, &ind);
+	buffer_append_float16(buffer, conf->app_pas_conf.torque_max_nm, 10, &ind);
+	buffer_append_float16(buffer, conf->app_pas_conf.torque_deadband_nm, 100, &ind);
 	buffer[ind++] = conf->imu_conf.type;
 	buffer[ind++] = conf->imu_conf.mode;
 	buffer[ind++] = conf->imu_conf.filter;
@@ -671,6 +677,12 @@ bool confgenerator_deserialize_appconf(const uint8_t *buffer, app_configuration 
 	conf->app_pas_conf.ramp_time_pos = buffer_get_float16(buffer, 100, &ind);
 	conf->app_pas_conf.ramp_time_neg = buffer_get_float16(buffer, 100, &ind);
 	conf->app_pas_conf.update_rate_hz = buffer_get_uint16(buffer, &ind);
+	conf->app_pas_conf.torque_source = buffer[ind++];
+	conf->app_pas_conf.torque_adc_ch = buffer[ind++];
+	conf->app_pas_conf.torque_zero_v = buffer_get_float16(buffer, 1000, &ind);
+	conf->app_pas_conf.torque_nm_per_v = buffer_get_float16(buffer, 100, &ind);
+	conf->app_pas_conf.torque_max_nm = buffer_get_float16(buffer, 10, &ind);
+	conf->app_pas_conf.torque_deadband_nm = buffer_get_float16(buffer, 100, &ind);
 	conf->imu_conf.type = buffer[ind++];
 	conf->imu_conf.mode = buffer[ind++];
 	conf->imu_conf.filter = buffer[ind++];
@@ -1004,6 +1016,12 @@ void confgenerator_set_defaults_appconf(app_configuration *conf) {
 	conf->app_pas_conf.ramp_time_pos = APPCONF_PAS_RAMP_TIME_POS;
 	conf->app_pas_conf.ramp_time_neg = APPCONF_PAS_RAMP_TIME_NEG;
 	conf->app_pas_conf.update_rate_hz = APPCONF_PAS_UPDATE_RATE_HZ;
+	conf->app_pas_conf.torque_source = APPCONF_PAS_TORQUE_SOURCE;
+	conf->app_pas_conf.torque_adc_ch = APPCONF_PAS_TORQUE_ADC_CH;
+	conf->app_pas_conf.torque_zero_v = APPCONF_PAS_TORQUE_ZERO_V;
+	conf->app_pas_conf.torque_nm_per_v = APPCONF_PAS_TORQUE_NM_PER_V;
+	conf->app_pas_conf.torque_max_nm = APPCONF_PAS_TORQUE_MAX_NM;
+	conf->app_pas_conf.torque_deadband_nm = APPCONF_PAS_TORQUE_DEADBAND_NM;
 	conf->imu_conf.type = APPCONF_IMU_TYPE;
 	conf->imu_conf.mode = APPCONF_IMU_AHRS_MODE;
 	conf->imu_conf.filter = APPCONF_IMU_FILTER;

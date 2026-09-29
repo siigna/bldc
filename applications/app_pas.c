@@ -33,6 +33,7 @@
 #include "commands.h"
 #include "hw.h"
 #include <math.h>
+#include <string.h>
 
 // Settings
 #define MAX_MS_WITHOUT_CADENCE_OR_TORQUE	5000
@@ -59,6 +60,12 @@ static volatile bool is_running = false;
 static volatile float torque_ratio = 0.0;
 static volatile bool sensor_type_unsupported = false;
 static volatile bool pins_unavailable = false;
+static volatile float torque_nm = 0.0;
+static volatile float torque_volts = 0.0;
+static volatile bool torque_saturated = false;
+static volatile bool torque_ch_invalid = false;
+static volatile bool torque_src_unsupported = false;
+static float torque_filter_v = 0.0;
 
 // Pedal decoder state. Kept at file scope so that it can be reset when the
 // app is reconfigured or restarted, which function-local statics cannot be.
@@ -76,12 +83,8 @@ static int32_t dec_correct_direction_counter = 0;
 static systime_t out_last_time = 0;
 static float out_ramp = 0.0;
 static int out_pulses_without_power_before = 0;
-#ifdef HW_HAS_PAS_TORQUE_SENSOR
 static float out_ms_without_cadence_or_torque = 0.0;
 static float out_ms_without_cadence = 0.0;
-#else
-static volatile bool torque_unsupported = false;
-#endif
 
 /**
  * Configure and initialize PAS application
@@ -107,10 +110,16 @@ void app_pas_configure(pas_config *conf) {
 	out_last_time = chVTGetSystemTimeX();
 	out_ramp = 0.0;
 	out_pulses_without_power_before = 0;
-#ifdef HW_HAS_PAS_TORQUE_SENSOR
 	out_ms_without_cadence_or_torque = 0.0;
 	out_ms_without_cadence = 0.0;
-#endif
+
+	torque_nm = 0.0;
+	torque_volts = 0.0;
+	torque_ratio = 0.0;
+	torque_filter_v = 0.0;
+	torque_saturated = false;
+	torque_ch_invalid = false;
+	torque_src_unsupported = false;
 
 	// a period longer than this should immediately reduce power to zero
 	max_pulse_period = 1.0 / ((config.pedal_rpm_start / 60.0) * config.magnets) * 1.2;
@@ -119,6 +128,110 @@ void app_pas_configure(pas_config *conf) {
 	min_pedal_period = 1.0 / ((config.pedal_rpm_end * 3.0 / 60.0));
 
 	(config.invert_pedal_direction) ? (direction_conf = -1.0) : (direction_conf = 1.0);
+}
+
+/**
+ * Resolve the configured torque sensor ADC channel, or -1 when this hardware
+ * does not have it.
+ *
+ * hw.h aliases ADC_IND_EXT2 through ADC_IND_EXT8 to ADC_IND_EXT when a board
+ * does not define them, so testing with #ifdef is always true and would
+ * silently read the throttle input. The values are compared instead.
+ */
+static int pas_torque_adc_index(void) {
+	switch (config.torque_adc_ch) {
+		case PAS_TORQUE_ADC_EXT1:
+			return ADC_IND_EXT;
+#if ADC_IND_EXT2 != ADC_IND_EXT
+		case PAS_TORQUE_ADC_EXT2:
+			return ADC_IND_EXT2;
+#endif
+#if ADC_IND_EXT3 != ADC_IND_EXT
+		case PAS_TORQUE_ADC_EXT3:
+			return ADC_IND_EXT3;
+#endif
+#if ADC_IND_EXT4 != ADC_IND_EXT
+		case PAS_TORQUE_ADC_EXT4:
+			return ADC_IND_EXT4;
+#endif
+#if ADC_IND_EXT5 != ADC_IND_EXT
+		case PAS_TORQUE_ADC_EXT5:
+			return ADC_IND_EXT5;
+#endif
+#if ADC_IND_EXT6 != ADC_IND_EXT
+		case PAS_TORQUE_ADC_EXT6:
+			return ADC_IND_EXT6;
+#endif
+#if ADC_IND_EXT7 != ADC_IND_EXT
+		case PAS_TORQUE_ADC_EXT7:
+			return ADC_IND_EXT7;
+#endif
+#if ADC_IND_EXT8 != ADC_IND_EXT
+		case PAS_TORQUE_ADC_EXT8:
+			return ADC_IND_EXT8;
+#endif
+		default:
+			return -1;
+	}
+}
+
+/**
+ * Read the crank torque in Nm.
+ *
+ * Torque is carried as a unit rather than as a ratio of full scale, because
+ * that is what makes rider power expressible. Board implementations behind
+ * HW_HAS_PAS_TORQUE_SENSOR report a ratio, so the configured full scale is used
+ * to express those in Nm as well.
+ *
+ * Returns zero, and records why, when no torque reading is available.
+ */
+float pas_read_torque_nm(void) {
+	switch (config.torque_source) {
+		case PAS_TORQUE_SRC_HW:
+#ifdef HW_HAS_PAS_TORQUE_SENSOR
+			torque_src_unsupported = false;
+			return hw_get_PAS_torque() * config.torque_max_nm;
+#else
+			torque_src_unsupported = true;
+			return 0.0;
+#endif
+
+		case PAS_TORQUE_SRC_ADC: {
+			int adc_ch = pas_torque_adc_index();
+
+			if (adc_ch < 0) {
+				torque_ch_invalid = true;
+				return 0.0;
+			}
+			torque_ch_invalid = false;
+
+			float volts = ADC_VOLTS(adc_ch);
+			torque_volts = volts;
+
+			// A sensor whose output runs above the ADC reference clips, and the
+			// assist then flattens out at whatever the clip corresponds to
+			// rather than at full effort. Surface that instead of leaving it to
+			// be discovered on a hill.
+			torque_saturated = volts >= (V_REG * 0.99);
+
+			UTILS_LP_MOVING_AVG_APPROX(torque_filter_v, volts, FILTER_SAMPLES);
+
+			float nm = (torque_filter_v - config.torque_zero_v) * config.torque_nm_per_v;
+
+			// Only forward pedal force assists. Backwards force reads as
+			// negative and is not a brake request.
+			if (nm < 0.0) {
+				nm = 0.0;
+			}
+
+			utils_deadband(&nm, config.torque_deadband_nm, config.torque_max_nm);
+			utils_truncate_number(&nm, 0.0, config.torque_max_nm);
+			return nm;
+		}
+
+		default:
+			return 0.0;
+	}
 }
 
 /**
@@ -151,6 +264,71 @@ static bool pas_pins_available(void) {
 #endif
 }
 
+static void terminal_pas_torque(int argc, const char **argv) {
+	if (config.torque_source != PAS_TORQUE_SRC_ADC) {
+		commands_printf("The torque source is not set to ADC, so there is nothing to read.");
+		commands_printf(" ");
+		return;
+	}
+
+	int adc_ch = pas_torque_adc_index();
+	if (adc_ch < 0) {
+		commands_printf("ADC channel %d is not available on this hardware.",
+				(int)config.torque_adc_ch + 1);
+		commands_printf(" ");
+		return;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "zero") == 0) {
+		// Average with the cranks at rest to find the zero point. Kept to about
+		// a second because this runs on the thread that serves the terminal.
+		const int samples = 100;
+		float sum = 0.0;
+		float min_v = 10.0;
+		float max_v = 0.0;
+
+		commands_printf("Measuring with no force on the cranks, about one second.");
+
+		for (int i = 0; i < samples; i++) {
+			float v = ADC_VOLTS(adc_ch);
+			sum += v;
+			if (v < min_v) {
+				min_v = v;
+			}
+			if (v > max_v) {
+				max_v = v;
+			}
+			chThdSleepMilliseconds(10);
+		}
+
+		float mean = sum / (float)samples;
+		commands_printf("Mean    : %.4f V", (double)mean);
+		commands_printf("Spread  : %.4f V (min %.4f, max %.4f)", (double)(max_v - min_v),
+				(double)min_v, (double)max_v);
+		commands_printf("Currently configured zero: %.4f V", (double)config.torque_zero_v);
+		commands_printf(" ");
+		commands_printf("Set PAS Torque Zero Voltage to the mean above if the cranks were");
+		commands_printf("at rest. This does not write the configuration.");
+	} else {
+		float volts = ADC_VOLTS(adc_ch);
+		float nm = (volts - config.torque_zero_v) * config.torque_nm_per_v;
+
+		commands_printf("ADC channel   : %d", adc_ch);
+		commands_printf("Voltage       : %.4f V  (reference %.2f V)", (double)volts,
+				(double)V_REG);
+		commands_printf("Filtered      : %.4f V", (double)torque_filter_v);
+		commands_printf("Raw torque    : %.2f Nm (before deadband and limits)", (double)nm);
+		commands_printf("Reported      : %.2f Nm", (double)torque_nm);
+		if (volts >= (V_REG * 0.99)) {
+			commands_printf("SATURATED: at or above the ADC reference.");
+		}
+		commands_printf(" ");
+		commands_printf("Run \"pas_torque zero\" with no force on the cranks to measure the zero point.");
+	}
+
+	commands_printf(" ");
+}
+
 static void terminal_pas_status(int argc, const char **argv) {
 	(void)argc; (void)argv;
 
@@ -179,14 +357,37 @@ static void terminal_pas_status(int argc, const char **argv) {
 		commands_printf("  cadence input. Disable UART comms or use hardware with dedicated pins.");
 	}
 
-#ifdef HW_HAS_PAS_TORQUE_SENSOR
-	commands_printf("Torque sensor     : present, ratio %.3f", (double)torque_ratio);
-#else
-	commands_printf("Torque sensor     : NOT SUPPORTED on this hardware");
-	if (torque_unsupported) {
-		commands_printf("  A torque control type is selected but cannot produce output.");
+	static const char *src_names[] = {"none", "hardware", "adc"};
+	commands_printf("Torque source     : %s",
+			config.torque_source <= PAS_TORQUE_SRC_ADC ?
+					src_names[config.torque_source] : "invalid");
+	commands_printf("Torque            : %.2f Nm (ratio %.3f)", (double)torque_nm,
+			(double)torque_ratio);
+
+	if (config.torque_source == PAS_TORQUE_SRC_ADC) {
+		commands_printf("Torque ADC ch     : %d%s", (int)config.torque_adc_ch + 1,
+				torque_ch_invalid ? "  NOT AVAILABLE on this hardware" : "");
+		commands_printf("Torque voltage    : %.3f V (zero %.3f V, %.1f Nm/V)",
+				(double)torque_volts, (double)config.torque_zero_v,
+				(double)config.torque_nm_per_v);
+		commands_printf("ADC reference     : %.2f V", (double)V_REG);
+		if (torque_saturated) {
+			commands_printf("  SATURATED: the sensor output is at or above the ADC reference,");
+			commands_printf("  so torque above this point cannot be measured. Fit a divider.");
+		}
 	}
-#endif
+
+	if (torque_src_unsupported) {
+		commands_printf("  The hardware torque source is selected, but this board does not");
+		commands_printf("  implement one. Use the ADC source instead.");
+	}
+
+	if ((config.ctrl_type == PAS_CTRL_TYPE_TORQUE ||
+			config.ctrl_type == PAS_CTRL_TYPE_TORQUE_WITH_CADENCE_TIMEOUT) &&
+			config.torque_source == PAS_TORQUE_SRC_NONE) {
+		commands_printf("  A torque control type is selected with no torque source, so");
+		commands_printf("  there is no assist. Set the torque source.");
+	}
 
 	if (sensor_type_unsupported) {
 		commands_printf("WARNING: sensor type %d is not supported, no cadence is decoded.",
@@ -225,6 +426,12 @@ void app_pas_start(bool is_primary_output) {
 			"Print the state of the PAS app and what the hardware supports",
 			0,
 			terminal_pas_status);
+
+	terminal_register_command_callback(
+			"pas_torque",
+			"Read the analog PAS torque sensor. Add \"zero\" to measure the zero point.",
+			"[zero]",
+			terminal_pas_torque);
 }
 
 bool app_pas_is_running(void) {
@@ -238,6 +445,7 @@ void app_pas_stop(void) {
 	}
 
 	terminal_unregister_callback(terminal_pas_status);
+	terminal_unregister_callback(terminal_pas_torque);
 
 	if (primary_output == true) {
 		mc_interface_set_current_rel(0.0);
@@ -257,6 +465,22 @@ float app_pas_get_current_target_rel(void) {
 
 float app_pas_get_pedal_rpm(void) {
 	return pedal_rpm;
+}
+
+float app_pas_get_torque_nm(void) {
+	return torque_nm;
+}
+
+float app_pas_get_torque_ratio(void) {
+	return torque_ratio;
+}
+
+bool app_pas_torque_saturated(void) {
+	return torque_saturated;
+}
+
+bool app_pas_torque_ch_invalid(void) {
+	return torque_ch_invalid;
 }
 
 /**
@@ -334,6 +558,56 @@ static void pas_decode_quadrature(void) {
 }
 
 /**
+ * Decode a single-wire pedal sensor.
+ *
+ * One edge per magnet and no direction information, so invert_pedal_direction
+ * has no effect here and back-pedalling is indistinguishable from pedalling
+ * forwards. min_pedal_period doubles as the contact debounce. Follows the
+ * single-wire decoder in hwconf/itr/hw_itr_x1_core.c.
+ */
+static void pas_decode_single_wire(void) {
+#ifdef HW_PAS1_PORT
+	uint8_t level = palReadPad(HW_PAS1_PORT, HW_PAS1_PIN);
+	uint8_t prev = dec_old_state;
+	dec_old_state = level;
+
+	if (level && !prev) {
+		float pulse_age = UTILS_AGE_S(dec_last_pulse_time);
+		dec_last_pulse_time = chVTGetSystemTimeX();
+
+		// As for quadrature, the first pulse after a start or after an idle
+		// period is only a reference for the next one.
+		if (!dec_have_reference || pulse_age > max_pulse_period) {
+			dec_have_reference = true;
+			dec_period_filtered = 0.0;
+			return;
+		}
+
+		// One crank revolution.
+		float period = pulse_age * (float)config.magnets;
+
+		if (period < min_pedal_period) { // can't be that short, abort
+			return;
+		}
+
+		if (config.use_filter && dec_period_filtered > 0.0) {
+			UTILS_LP_MOVING_AVG_APPROX(dec_period_filtered, period, FILTER_SAMPLES);
+		} else {
+			dec_period_filtered = period;
+		}
+
+		pedal_rpm = 60.0 / dec_period_filtered;
+	} else {
+		// If no pedal activity, set RPM as zero
+		if (UTILS_AGE_S(dec_last_pulse_time) > max_pulse_period) {
+			pedal_rpm = 0.0;
+			dec_period_filtered = 0.0;
+		}
+	}
+#endif
+}
+
+/**
  * Read the pedal sensor selected by config.sensor_type.
  */
 void pas_event_handler(void) {
@@ -345,6 +619,10 @@ void pas_event_handler(void) {
 	switch (config.sensor_type) {
 		case PAS_SENSOR_TYPE_QUADRATURE:
 			pas_decode_quadrature();
+			break;
+
+		case PAS_SENSOR_TYPE_SINGLE_WIRE:
+			pas_decode_single_wire();
 			break;
 
 		default:
@@ -420,15 +698,23 @@ static THD_FUNCTION(pas_thread, arg) {
 				}
 				break;
 
-#ifdef HW_HAS_PAS_TORQUE_SENSOR
 			case PAS_CTRL_TYPE_TORQUE:
 			case PAS_CTRL_TYPE_TORQUE_WITH_CADENCE_TIMEOUT:
 			{
 				// Both torque types sample the sensor. Previously only the first case
 				// did, and the second relied on falling into it, so selecting the
 				// second one directly never computed an output at all.
-				torque_ratio = hw_get_PAS_torque();
-				output = torque_ratio * config.current_scaling * sub_scaling;
+				//
+				// The reading comes from whichever source is configured, so this is
+				// no longer restricted to boards that implement hw_get_PAS_torque().
+				torque_nm = pas_read_torque_nm();
+
+				float ratio = config.torque_max_nm > 0.01 ?
+						torque_nm / config.torque_max_nm : 0.0;
+				utils_truncate_number(&ratio, 0.0, 1.0);
+				torque_ratio = ratio;
+
+				output = ratio * config.current_scaling * sub_scaling;
 				utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
 
 				// The cadence checks below are applied to both types. They were added
@@ -457,17 +743,7 @@ static THD_FUNCTION(pas_thread, arg) {
 				}
 			}
 			break;
-#else
-			case PAS_CTRL_TYPE_TORQUE:
-			case PAS_CTRL_TYPE_TORQUE_WITH_CADENCE_TIMEOUT:
-				// This hardware has no torque sensor. Without this case the torque
-				// control types fell through to default and produced nothing at all,
-				// which is indistinguishable from the app being inactive. Record it
-				// so that "pas_status" can report it.
-				output = 0.0;
-				torque_unsupported = true;
-				break;
-#endif
+
 			default:
 				break;
 		}

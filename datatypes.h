@@ -689,10 +689,30 @@ typedef enum {
 	PAS_CTRL_TYPE_TORQUE_WITH_CADENCE_TIMEOUT
 } pas_control_type;
 
-// PAS sensor types
+// PAS cadence sensor types
 typedef enum {
-	PAS_SENSOR_TYPE_QUADRATURE = 0
+	PAS_SENSOR_TYPE_QUADRATURE = 0,
+	PAS_SENSOR_TYPE_SINGLE_WIRE
 } pas_sensor_type;
+
+// Where the PAS torque reading comes from
+typedef enum {
+	PAS_TORQUE_SRC_NONE = 0,
+	PAS_TORQUE_SRC_HW,
+	PAS_TORQUE_SRC_ADC
+} pas_torque_source;
+
+// Which ADC channel an analog PAS torque sensor is on
+typedef enum {
+	PAS_TORQUE_ADC_EXT1 = 0,
+	PAS_TORQUE_ADC_EXT2,
+	PAS_TORQUE_ADC_EXT3,
+	PAS_TORQUE_ADC_EXT4,
+	PAS_TORQUE_ADC_EXT5,
+	PAS_TORQUE_ADC_EXT6,
+	PAS_TORQUE_ADC_EXT7,
+	PAS_TORQUE_ADC_EXT8
+} pas_torque_adc_ch;
 
 typedef struct {
 	adc_control_type ctrl_type;
@@ -761,6 +781,12 @@ typedef struct {
 	float ramp_time_pos;
 	float ramp_time_neg;
 	uint32_t update_rate_hz;
+	pas_torque_source torque_source;
+	pas_torque_adc_ch torque_adc_ch;
+	float torque_zero_v;
+	float torque_nm_per_v;
+	float torque_max_nm;
+	float torque_deadband_nm;
 } pas_config;
 
 // NRF Datatypes

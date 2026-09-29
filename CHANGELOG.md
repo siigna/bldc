@@ -18,6 +18,13 @@
 	* The pedal decoder and output ramp are reset when the app is reconfigured or restarted.
 	* The COMM UART pads, which are the fallback when a board has no dedicated pedal sensor pins, are no longer reconfigured as inputs while UART communication is in use.
 	* Added the pas_status terminal command.
+* App PAS sensor support:
+	* Single wire pedal sensors, in addition to quadrature.
+	* Analog torque sensors on a configurable ADC channel, with a configurable zero point, scale in Nm/V, full scale and deadband. Previously a torque sensor needed a board specific implementation, which only one board has.
+	* Crank torque is carried in Nm rather than as a ratio of full scale.
+	* A torque sensor reading at or above the ADC reference is reported as saturated rather than appearing as a plateau in the assist.
+	* An ADC channel the hardware does not provide is rejected. hw.h aliases the unavailable channels to the first one, so such a setting would otherwise read the throttle input.
+	* Added the pas_torque terminal command, which reads the sensor and measures its zero point.
 
 ### 7.00
 #### 2026-05-15
