@@ -156,3 +156,66 @@ enforced anywhere in the firmware, so any sender of `COMM_SET_APPCONF` can
 write one. Fixed in `pas_output_ceiling`, and kept as
 `test_negative_scaling_cannot_brake` -- a fuzzer finding is only a regression
 test once it is one.
+
+## clang-tidy
+
+Checks are in `.clang-tidy` at the top of the tree, curated with the reasoning
+there. The default sets are unusable on a codebase of this age:
+`bugprone-narrowing-conversions` alone fires on every `static float x = 0.0;`
+in the firmware, which is the house style, and `misc-include-cleaner` fights
+the umbrella headers the tree uses on purpose. Left on: `clang-analyzer`'s
+path-sensitive checks, and the `bugprone`, `misc` and `performance` checks that
+are not about house style.
+
+It found one real bug. The thread took its interval through `ST2MS`, which
+divides as integers **and rounds up**, so `dt_ms` was quantised to whole
+milliseconds. At the default 500 Hz update rate that happens to be exact, which
+is why nothing noticed; but the rate is configurable, and at 3 kHz a true 0.3 ms
+interval came back as 1 ms -- three times too long, feeding the output ramp and
+the power loop's integral. It is scaled in floating point now.
+
+Two findings in the tests were mine and fixed: a `memcmp` over `pas_config`,
+which has padding whose bytes are unspecified, so the comparison could report a
+difference that was not one; and an out-of-range enum cast, which is the point
+of that test and carries a `NOLINTNEXTLINE` with the reason.
+
+Three findings are upstream and left alone: `bugprone-macro-parentheses` on
+`UTILS_NAN_ZERO` and `UTILS_LP_FAST` in `util/utils_math.h`, where the
+assignment target is not parenthesised. Real, and worth reporting, but misusing
+either is a compile error rather than silent misbehaviour, and those macros are
+used across the whole tree.
+
+Two things about running it that cost an hour between them, both now handled in
+`check.sh`:
+
+- **`WarningsAsErrors: '*'` is wrong here.** It counts warnings raised inside
+  *system* headers, which clang-tidy neither displays nor lets you fix, so it
+  exits non-zero having printed nothing at all. `check.sh` decides instead, by
+  failing when a diagnostic is printed for a file that is ours.
+- **Include order matters.** The stub directory has to come before `-I.`, or
+  `timeout.h` resolves to the real one and nothing parses. The Makefile always
+  had it right because it runs from inside this directory.
+
+## Tree-wide cppcheck
+
+`./tests/check.sh --tree` runs cppcheck over `applications`, `util`, `comm`,
+`motor` and `driver`. It is **informational and does not gate**, because what it
+finds is not this branch's to fix.
+
+At `warning,performance,portability` the whole firmware produces four findings,
+and all four are false positives or environmental:
+
+| finding | why it is not a bug |
+|---|---|
+| `mcpwm.c:540,541` division by zero | `curr_start_samples` is a `volatile` a busy-wait waits for an interrupt to raise; cppcheck cannot see the ISR |
+| `mcpwm.c:2333` uninitialised `val_sample` | same, a struct an interrupt fills |
+| `lzodefs.h` `#error` | needs LZO's own defines to preprocess |
+
+Adding `style` takes it to 141, of which 77 are const-correctness and 28 are
+variable scope. The tail worth reading is five findings across
+`digital_filter.c`, `foc_math.c`, `mc_interface.c` and `driver/timer.c`, all
+double literals in float expressions or a small shift into a long -- benign.
+
+So the honest value of the tree-wide pass is as a **regression net**: a new
+finding in a file this branch touches is worth reading, and the standing four
+are not.

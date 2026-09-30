@@ -1268,6 +1268,10 @@ static void pas_decode_quadrature(void) {
 	switch(direction) {
 		case 1: dec_correct_direction_counter++; break;
 		case -1: dec_correct_direction_counter = 0; break;
+		// The 2 that QEM yields for an illegal double transition, and the 0 for
+		// no movement. Both deliberately do nothing, and saying so is what
+		// separates that from a missing case.
+		default: break;
 	}
 
 	// sensors are poorly placed, so use only one rising edge as reference
@@ -1660,7 +1664,15 @@ static THD_FUNCTION(pas_thread, arg) {
 		// The elapsed time is taken every iteration. Taking it only where it was
 		// used let it grow without bound whenever that was skipped, so the first
 		// enabled iteration took one unbounded step.
-		const float dt_ms = (float)ST2MS(chVTTimeElapsedSinceX(out_last_time));
+		//
+		// Scaled in floating point rather than through ST2MS, which divides as
+		// integers and rounds up: it quantises the interval to whole
+		// milliseconds. At the default 500 Hz that happens to be exact, but the
+		// update rate is configurable, and at 3 kHz a true 0.3 ms interval came
+		// back as 1 ms -- three times too long, into the ramp and the power
+		// loop's integral. clang-tidy's bugprone-integer-division found it.
+		const float dt_ms = (float)chVTTimeElapsedSinceX(out_last_time) *
+				(1000.0 / (float)CH_CFG_ST_FREQUENCY);
 		out_last_time = chVTGetSystemTimeX();
 
 		// Computed fresh every iteration: a control type that produces nothing

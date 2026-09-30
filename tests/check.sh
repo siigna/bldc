@@ -3,6 +3,7 @@
 #
 #   ./tests/check.sh            tests, sanitizers, static analysis, coverage
 #   ./tests/check.sh --fuzz     and a short fuzzing run
+#   ./tests/check.sh --tree     and cppcheck over the whole firmware
 #   FUZZ_SECS=600 ./tests/check.sh --fuzz    a longer one
 #
 # Each stage prints its own summary and the script exits non-zero if any of
@@ -11,7 +12,11 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 FUZZ=0
-[ "${1:-}" = "--fuzz" ] && FUZZ=1
+TREE=0
+for a in "$@"; do
+    [ "$a" = "--fuzz" ] && FUZZ=1
+    [ "$a" = "--tree" ] && TREE=1
+done
 
 fail=0
 stage() { printf '\n=== %s ===\n' "$1"; }
@@ -47,9 +52,35 @@ stage "cppcheck"
 cppcheck --enable=warning,style,performance,portability --inline-suppr \
     --suppress=missingIncludeSystem --error-exitcode=1 --std=c99 \
     -DNO_STM32 '-DHW_SOURCE="hw.h"' '-DHW_HEADER="hw.h"' \
-    -I. -Iutil -Iapplications -Imotor -Icomm -Itests/app_pas \
+    -Itests/app_pas -I. -Iutil -Iapplications -Imotor -Icomm \
     --quiet applications/app_pas.c tests/app_pas/*.c
 report $?
+
+stage "clang-tidy"
+# Checks are in .clang-tidy, curated there with the reasoning. Scoped to the
+# files this branch is responsible for: a tree-wide run needs a
+# compile_commands.json to get each board's defines right, and without one the
+# firmware files that depend on a hwconf do not parse.
+if command -v clang-tidy >/dev/null; then
+    # Failing on printed diagnostics rather than on the exit code. See the note
+    # in .clang-tidy: the exit code also counts warnings from system headers,
+    # which are not displayed and not ours.
+    out=$(clang-tidy applications/app_pas.c tests/app_pas/*.c -- \
+        -DNO_STM32 '-DHW_SOURCE="hw.h"' '-DHW_HEADER="hw.h"' \
+        -Itests/app_pas -I. -Iutil -Iapplications -Imotor -Icomm -std=gnu99 2>&1)
+
+    # A clang-tidy that cannot find the standard headers reports every one as a
+    # clang-diagnostic-error, which is an environment problem and not a finding.
+    # Saying so beats failing the branch over a toolchain that is missing its
+    # own include paths.
+    if echo "$out" | grep -q "file not found .clang-diagnostic-error"; then
+        echo "  skipped: clang-tidy cannot find the standard headers here"
+    else
+        echo "$out" | grep -E "warning:|error:" && report 1 || report 0
+    fi
+else
+    echo "  skipped: no clang-tidy"
+fi
 
 stage "coverage of the code under test"
 make -C tests/app_pas coverage 2>&1 | grep -E "Lines exec|Branches exec|unreached"
@@ -60,6 +91,26 @@ if [ "$FUZZ" = 1 ]; then
     make -C tests/app_pas fuzz-run FUZZ_SECS="${FUZZ_SECS:-30}" 2>&1 \
         | grep -E "INVARIANT|Test unit written|stat::number|stat::average|DONE"
     report "${PIPESTATUS[0]}"
+fi
+
+if [ "$TREE" = 1 ]; then
+    # Informational, and deliberately not gating. As of this branch the whole
+    # firmware produces four findings at this level, all of them false
+    # positives from volatiles an interrupt writes that cppcheck cannot see,
+    # plus an LZO header that needs defines to preprocess. With style enabled
+    # it is 141, of which 77 are const-correctness and 28 variable scope.
+    #
+    # So the value here is as a regression net rather than as a bug hunt: a new
+    # finding in a file this branch touches is worth reading, and the standing
+    # ones are not this branch's to fix.
+    stage "cppcheck over the whole firmware (informational)"
+    cppcheck --enable=warning,performance,portability --inline-suppr \
+        --suppress=missingIncludeSystem --suppress=missingInclude --std=c99 \
+        -DNO_STM32 '-DHW_SOURCE="hw.h"' '-DHW_HEADER="hw.h"' \
+        -I. -Iutil -Iapplications -Imotor -Icomm -j4 --quiet \
+        applications util comm motor driver 2>&1 \
+        | grep -E ": (error|warning|performance|portability):" || true
+    echo "  (not gating)"
 fi
 
 printf '\n'

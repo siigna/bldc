@@ -374,6 +374,11 @@ static void test_filter_is_honoured(void) {
 static void test_unsupported_sensor_type(void) {
 	printf("unsupported sensor type\n");
 	pas_config c = base_config();
+	// A value outside the enum is the whole point here: the firmware must
+	// report an unsupported sensor type rather than fall through to a default
+	// that silently produces no assist, and a configuration can arrive over
+	// CAN from anything.
+	// NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
 	c.sensor_type = (pas_sensor_type)7;
 	setup(&c);
 
@@ -2589,10 +2594,17 @@ static void test_terminal_commands(void) {
 	check(test_appconf.app_pas_conf.pedal_stop_hard, "stored: pedal stop is hard");
 
 	// An unknown preset must be refused rather than applying a partial one.
-	pas_config before = test_appconf.app_pas_conf;
+	// The four fields the preset writes, rather than memcmp over the struct:
+	// pas_config has padding, whose bytes are unspecified, so a comparison of
+	// the object representation can report a difference that is not one.
+	// clang-tidy flagged that, and it was right to.
+	const pas_config before = test_appconf.app_pas_conf;
 	const char *argv_bad[] = {"pas_preset", "nonsense"};
 	call_cmd("pas_preset", 2, argv_bad);
-	check(memcmp(&before, &test_appconf.app_pas_conf, sizeof(pas_config)) == 0,
+	check(before.taper_start_kmh == test_appconf.app_pas_conf.taper_start_kmh &&
+			before.taper_end_kmh == test_appconf.app_pas_conf.taper_end_kmh &&
+			before.power_max_w == test_appconf.app_pas_conf.power_max_w &&
+			before.pedal_stop_hard == test_appconf.app_pas_conf.pedal_stop_hard,
 			"an unknown preset changes nothing");
 	check(out_has("Usage"), "and prints its usage");
 
