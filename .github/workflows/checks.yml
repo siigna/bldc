@@ -1,0 +1,65 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Tests, sanitizers, analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck clang
+
+      # vesc_tool holds the parameter XML that the configuration signature is
+      # computed from. Without it that one stage skips rather than fails, so
+      # the checkout is allowed to fail on a fork that has no access.
+      - name: Check out vesc_tool for the config comparison
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: vedderb/vesc_tool
+          path: vesc_tool_co
+          sparse-checkout: res/config
+
+      - name: Put vesc_tool where check.sh looks for it
+        continue-on-error: true
+        run: |
+          [ -d vesc_tool_co ] && ln -s "$PWD/vesc_tool_co" ../vesc_tool || true
+
+      - name: Run the checks
+        run: ./tests/check.sh
+
+  fuzz:
+    name: Fuzz the PAS app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      # Short, because this runs on every push. A finding is written to
+      # tests/app_pas/crash-* and uploaded, so it can be replayed locally with
+      # ./fuzz <file>.
+      - name: Fuzz
+        run: make -C tests/app_pas fuzz-run FUZZ_SECS=120
+
+      - name: Upload any crash
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: tests/app_pas/crash-*
+          if-no-files-found: ignore

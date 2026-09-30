@@ -75,3 +75,61 @@ test that pedals and calls the control law once per pulse therefore
 misrepresents the sensor low-pass, and will show a residual that the board would
 not. `cycle_fwd_with_control` interleaves them at a realistic ratio; use it
 rather than driving pulses and the control law in separate loops.
+
+## Beyond `make run`
+
+`tests/check.sh` at the top of the tree runs all of this in one go, and is what
+CI runs. Individually:
+
+| target | what |
+|---|---|
+| `make run-all` | every board variant, and fails if any does |
+| `make run-san` | the same under AddressSanitizer and UndefinedBehaviorSanitizer |
+| `make coverage` | line and branch coverage of `app_pas.c`, summarised per function |
+| `make fuzz-run` | the property fuzzer, `FUZZ_SECS` to set the duration |
+
+The stub firmware lives in `fixture.c` rather than in `main.c` so that the
+fuzzer can link the same stubs without a second `main()`.
+
+### Coverage
+
+`make coverage` reports coverage of `app_pas.c`, not of the test file: what
+matters is which branches of the firmware the tests reach. `uncovered.py`
+groups the unreached lines by function, because a per-line report is too long
+to read and says which lines are untested rather than which behaviour is.
+
+Around a third of the file is the three terminal commands and the thread
+function, which need a terminal and a scheduler and are not reachable from
+here. Two getters are also unreachable in principle: `app_pas_is_running` and
+`app_pas_get_current_target_rel` report state the **thread** writes, so in a
+host test they read as their initial values however much the assist law is
+exercised. That is worth knowing rather than working around -- it also means
+`app_pas_apply_to_throttle` passes the throttle through unchanged for however
+long it takes the thread to be scheduled after a start.
+
+### The fuzzer
+
+`fuzz.c` drives the module with sequences no rider would produce: pedal pulses
+in illegal orders, time steps of zero, a torque signal above the reference, a
+pack voltage of zero or of 120 V, a configuration outside the limits VESC Tool
+enforces. Then it asserts the properties that have to hold whatever the input
+was -- output finite and within 0..1, pedal rpm within human range, the speed
+taper within 0..1, mixing closed over its input range.
+
+The properties are the point. A crash means an invariant broke, not that the
+module was fed something silly: it polls real hardware, and real hardware
+produces silly things -- a dirty sensor, a loose connector, a brownout that
+restarts one MCU and not the other.
+
+It found one real bug in its first second. `current_scaling * sub_scaling` is
+used as the `max` argument of `utils_truncate_number`, which tests the maximum
+before the minimum, so a **negative** ceiling clamped the output to that
+negative value instead of to the zero minimum -- and
+`mc_interface_set_current_rel` reads a negative value as braking current. A
+negative PAS Max Current made pedalling brake the bike in proportion to
+cadence. VESC Tool will not send one, since the parameter's minimum is zero,
+but the XML limits are not part of the configuration signature and are not
+enforced anywhere in the firmware, so any sender of `COMM_SET_APPCONF` can
+write one. Fixed in `pas_output_ceiling`, and kept as
+`test_negative_scaling_cannot_brake` -- a fuzzer finding is only a regression
+test once it is one.

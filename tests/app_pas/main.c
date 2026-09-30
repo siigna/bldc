@@ -15,41 +15,18 @@
 #include "datatypes.h"
 #include "app.h"
 
-// Stub state referenced by the stub headers.
-systime_t test_now = 0;
-uint8_t test_pad[2] = {0, 0};
-mc_fault_code test_fault = FAULT_CODE_NONE;
-float test_current_rel = 0.0;
-volatile uint16_t ADC_Value[16] = {0};
-float test_v_in = 50.0;
-float test_speed = 0.0;
-float test_current_in = 0.0;
-mc_configuration test_mcconf;
-
-// Stubs for the rest of the firmware that app_pas.c calls.
-static app_configuration test_appconf;
-const app_configuration *app_get_configuration(void) { return &test_appconf; }
-bool app_is_output_disabled(void) { return false; }
-int commands_printf(const char *format, ...) { (void)format; return 0; }
-void terminal_register_command_callback(const char *command, const char *help,
-		const char *arg_names, void(*cbf)(int argc, const char **argv)) {
-	(void)command; (void)help; (void)arg_names; (void)cbf;
-}
-void terminal_unregister_callback(void(*cbf)(int argc, const char **argv)) { (void)cbf; }
-
-// The preset command writes the configuration. Recorded rather than performed.
-static app_configuration test_appconf_scratch;
-app_configuration *mempools_alloc_appconf(void) { return &test_appconf_scratch; }
-void mempools_free_appconf(app_configuration *p) { (void)p; }
-bool conf_general_store_app_configuration(app_configuration *c) {
-	test_appconf = *c;
-	return true;
-}
-void app_set_configuration(app_configuration *c) { test_appconf = *c; }
-#ifdef TEST_TORQUE_SENSOR
-float test_torque = 0.0;
-float hw_get_PAS_torque(void) { return test_torque; }
-#endif
+// The stub firmware lives in fixture.c, which the fuzzer shares.
+extern systime_t test_now;
+extern uint8_t test_pad[2];
+extern mc_fault_code test_fault;
+extern float test_current_rel;
+extern volatile uint16_t ADC_Value[16];
+extern float test_v_in;
+extern float test_speed;
+extern float test_current_in;
+extern mc_configuration test_mcconf;
+extern app_configuration test_appconf;
+extern float test_torque;
 
 // app_pas.c exposes the sensor front end without prototypes in app.h.
 void pas_event_handler(void);
@@ -2112,6 +2089,111 @@ static void test_power_closed_loop_needs_primary(void) {
 	test_current_in = 0.0;
 }
 
+// The getters the dash and the lisp bindings read, and the throttle wrapper
+// app_adc.c calls. Coverage showed every one of these unreached: they are one
+// or three lines each, but they are the whole of the interface this app
+// presents to the rest of the firmware, and a wrapper that returned the wrong
+// one of its two arguments would be invisible to every other test here.
+static void test_public_interface(void) {
+	printf("public interface\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	setup(&c);
+
+	// Not running: the throttle passes straight through, untouched. This is
+	// the path every board without PAS configured takes on every ADC cycle.
+	app_pas_stop();
+	check(!app_pas_is_running(), "stopped app reports not running");
+	check_near(app_pas_apply_to_throttle(0.4), 0.4, 0.0001,
+			"throttle passes through while stopped");
+	check_near(app_pas_apply_to_throttle(-0.3), -0.3, 0.0001,
+			"including a negative throttle");
+
+	// is_running is set by the thread, not by app_pas_start, and the host
+	// stub for chThdCreateStatic does not run one -- so the mixing branch of
+	// app_pas_apply_to_throttle cannot be reached from here. That is worth
+	// knowing rather than working around: it means the wrapper passes the
+	// throttle through unchanged for however long it takes the thread to be
+	// scheduled after a start, and the mixing itself is covered directly
+	// through pas_mix_throttle below.
+	test_appconf.app_to_use = APP_PAS;
+	app_pas_start(true);
+	check_near(app_pas_apply_to_throttle(0.4), 0.4, 0.0001,
+			"throttle still passes through before the thread has run");
+
+	pedal(60.0, 12);
+	// The return value, not app_pas_get_current_target_rel: that getter
+	// reports output_current_rel, which the thread writes after calling this.
+	// So it, like app_pas_is_running, reads as its initial value in a host
+	// test however much the assist law is exercised.
+	float assist = pas_compute_output(2.0);
+	check(assist > 0.0, "assist is being produced");
+
+	// What the wrapper would return once the thread has set is_running: the
+	// same call it makes, with the same two arguments.
+	check_near(pas_mix_throttle(0.0, assist), assist, 0.0001,
+			"assist becomes the throttle when the lever is at rest");
+	check_near(pas_mix_throttle(0.9, assist), 0.9, 0.0001,
+			"a larger throttle wins over the assist");
+
+	// The reporting getters. Values, not just finiteness: a getter returning
+	// the wrong field is the failure mode, and every one of these is read by
+	// the dash over CAN.
+	check_near(app_pas_get_speed_taper(), 1.0, 0.0001,
+			"taper is fully open below the taper start");
+	check_near(app_pas_get_torque_ratio(), 0.0, 0.0001,
+			"no torque ratio without a torque sensor");
+	check(app_pas_get_measured_power() >= 0.0, "measured power is not negative");
+
+	// The sub scaling another app can apply at runtime scales the ceiling,
+	// which is the only way that value is ever set.
+	app_pas_set_current_sub_scaling(0.5);
+	pedal(60.0, 12);
+	float scaled = pas_compute_output(2.0);
+	app_pas_set_current_sub_scaling(1.0);
+	pedal(60.0, 12);
+	float full = pas_compute_output(2.0);
+	check(scaled < full, "sub scaling reduces the output");
+
+	app_pas_stop();
+	test_appconf.app_to_use = APP_NONE;
+}
+
+// A negative PAS Max Current made pedalling produce braking current: the
+// ceiling is used as the maximum of utils_truncate_number, which tests the
+// maximum before the minimum, so a negative maximum clamped the output to it
+// rather than to zero. VESC Tool will not send one, but nothing in the
+// firmware enforces the XML limits and any sender of COMM_SET_APPCONF can.
+//
+// Found by fuzz.c. Kept here because a fuzzer finding is only a regression
+// test once it is one.
+static void test_negative_scaling_cannot_brake(void) {
+	printf("negative scaling cannot brake\n");
+
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	c.current_scaling = -0.88;
+	setup(&c);
+
+	pedal(60.0, 20);
+	for (int i = 0; i < 20; i++) {
+		float out = pas_compute_output(2.0);
+		check(out >= 0.0, "no negative output from a negative scaling");
+	}
+
+	// The same through the sub scaling, which is not a configuration field at
+	// all and arrives from another app at runtime.
+	c.current_scaling = 0.5;
+	setup(&c);
+	app_pas_set_current_sub_scaling(-1.0);
+	pedal(60.0, 20);
+	for (int i = 0; i < 20; i++) {
+		check(pas_compute_output(2.0) >= 0.0,
+				"no negative output from a negative sub scaling");
+	}
+	app_pas_set_current_sub_scaling(1.0);
+}
+
 int main(void) {
 	memset(&test_appconf, 0, sizeof(test_appconf));
 	memset(&test_mcconf, 0, sizeof(test_mcconf));
@@ -2181,6 +2263,8 @@ int main(void) {
 	test_assist_start_power();
 	test_throttle_mixing();
 	test_throttle_needs_pedalling();
+	test_public_interface();
+	test_negative_scaling_cannot_brake();
 	test_walk_basic();
 	test_walk_keepalive_expires();
 	test_walk_speed_limit();

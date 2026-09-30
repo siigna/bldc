@@ -150,6 +150,9 @@ static float out_ms_without_cadence = 0.0;
  * @param conf
  * App config
  */
+// cppcheck-suppress constParameterPointer ; matches app.h and every other
+// app_*_configure in the tree, which cannot take const without changing all of
+// them and the app_configuration they are called with.
 void app_pas_configure(pas_config *conf) {
 	config = *conf;
 	ms_without_power = 0.0;
@@ -673,6 +676,35 @@ static float pas_walk_output(void) {
  * cap. Otherwise the trim would wind up against a limit applied after it, and
  * then take time to unwind once the cap was no longer binding.
  */
+/*
+ * The ceiling every control type clamps its output to, as a fraction of the
+ * global current limit.
+ *
+ * Clamped non-negative because it is used as the max argument of
+ * utils_truncate_number, which tests the maximum first: given a negative
+ * maximum it clamps to that rather than to the zero minimum, and the output
+ * leaves here negative. mc_interface_set_current_rel reads a negative value as
+ * braking current, so a negative PAS Max Current made pedalling brake the
+ * bike, in proportion to cadence.
+ *
+ * VESC Tool will not produce one -- the parameter's minimum is zero -- but the
+ * limits in the XML are not part of the configuration signature and are not
+ * enforced anywhere in the firmware, so any sender of COMM_SET_APPCONF can
+ * write whatever it likes. The same applies to the sub scaling, which arrives
+ * from another app at runtime rather than from a configuration at all.
+ *
+ * Found by tests/app_pas/fuzz.c.
+ */
+static float pas_output_ceiling(void) {
+	float ceiling = config.current_scaling * sub_scaling;
+	if (!(ceiling > 0.0)) {
+		// Also catches NaN, which compares false against everything and would
+		// otherwise pass straight through the clamps.
+		return 0.0;
+	}
+	return ceiling;
+}
+
 static float pas_power_cap_rel(void) {
 	if (config.power_max_w <= 0.1) {
 		return 1.0;
@@ -1454,11 +1486,11 @@ float pas_compute_output(float dt_ms) {
 			// NOTE: If the limits are the same a numerical instability is approached, so in that case
 			// just use on/off control (which is what setting the limits to the same value essentially means).
 			if (config.pedal_rpm_end > (config.pedal_rpm_start + 1.0)) {
-				output = utils_map(pedal_rpm, config.pedal_rpm_start, config.pedal_rpm_end, 0.0, config.current_scaling * sub_scaling);
-				utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
+				output = utils_map(pedal_rpm, config.pedal_rpm_start, config.pedal_rpm_end, 0.0, pas_output_ceiling());
+				utils_truncate_number(&output, 0.0, pas_output_ceiling());
 			} else {
 				if (pedal_rpm > config.pedal_rpm_end) {
-					output = config.current_scaling * sub_scaling;
+					output = pas_output_ceiling();
 				} else {
 					output = 0.0;
 				}
@@ -1482,8 +1514,8 @@ float pas_compute_output(float dt_ms) {
 			utils_truncate_number(&ratio, 0.0, 1.0);
 			torque_ratio = ratio;
 
-			output = ratio * config.current_scaling * sub_scaling;
-			utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
+			output = ratio * pas_output_ceiling();
+			utils_truncate_number(&output, 0.0, pas_output_ceiling());
 
 			// The cadence checks below are applied to both types. They were added
 			// as a safety fix and reached the plain torque type through the
@@ -1538,14 +1570,14 @@ float pas_compute_output(float dt_ms) {
 
 			// The ceiling the trim must not wind up past is the tighter of the
 			// assist current limit and the power cap, both applied after this.
-			float ceiling = config.current_scaling * sub_scaling;
+			float ceiling = pas_output_ceiling();
 			const float cap_rel = pas_power_cap_rel();
 			if (cap_rel < ceiling) {
 				ceiling = cap_rel;
 			}
 
 			output = pas_power_to_current_rel(motor_power_w, ceiling, dt_ms);
-			utils_truncate_number(&output, 0.0, config.current_scaling * sub_scaling);
+			utils_truncate_number(&output, 0.0, pas_output_ceiling());
 		}
 		break;
 
@@ -1566,7 +1598,7 @@ float pas_compute_output(float dt_ms) {
 	if (ramp_time > 0.01) {
 		const float ramp_step = (dt_ms / 1000.0) / ramp_time;
 		utils_step_towards(&out_ramp, output, ramp_step);
-		utils_truncate_number(&out_ramp, 0.0, config.current_scaling * sub_scaling);
+		utils_truncate_number(&out_ramp, 0.0, pas_output_ceiling());
 		output = out_ramp;
 	}
 
