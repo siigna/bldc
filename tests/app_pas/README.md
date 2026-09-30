@@ -98,14 +98,37 @@ matters is which branches of the firmware the tests reach. `uncovered.py`
 groups the unreached lines by function, because a per-line report is too long
 to read and says which lines are untested rather than which behaviour is.
 
-Around a third of the file is the three terminal commands and the thread
-function, which need a terminal and a scheduler and are not reachable from
-here. Two getters are also unreachable in principle: `app_pas_is_running` and
-`app_pas_get_current_target_rel` report state the **thread** writes, so in a
-host test they read as their initial values however much the assist law is
-exercised. That is worth knowing rather than working around -- it also means
-`app_pas_apply_to_throttle` passes the throttle through unchanged for however
-long it takes the thread to be scheduled after a start.
+Both the thread and the terminal commands **are** covered, through two seams
+in the stubs rather than through changes to the firmware:
+
+- `chThdCreateStatic` records the thread entry point instead of starting one.
+  `pas_thread` is static inside `app_pas.c`, so this is the only way a test can
+  reach it. `run_thread` then calls it directly.
+- `terminal_register_command_callback` records the name and callback, so a test
+  can invoke a command with its own `argv` and read what it printed back out of
+  the buffer `commands_printf` fills.
+
+Leaving the thread loop is the awkward part, and worth knowing about. It exits
+when `stop_now` is set, and the only thing that sets it is `app_pas_stop` --
+which then spins until the thread clears `is_running`. Called from inside the
+thread that is a deadlock. So the sleep hook `longjmp`s out after a set number
+of iterations, which leaves `is_running` true, exactly as it is on real
+hardware while the thread runs. Nothing may call `app_pas_stop` afterwards,
+which is why the thread test runs last. The real exit path needs a scheduler
+and stays uncovered.
+
+What the thread tests are actually for is the interlocks, which is the part of
+the file that decides whether the motor gets current: safe start, the fault
+check, and the output-disabled path. Two of those turn out **not to write the
+motor at all** rather than writing zero, which is the stronger guarantee and
+what the tests assert -- a sentinel value left untouched, plus a published zero
+for the throttle app to read.
+
+Still uncovered, and why: about half of `pas_status`, which is advisory text
+behind conditions a bench session would have to construct one at a time; the
+`is_running` branch of `app_pas_apply_to_throttle`, for the reason above; and
+the handful of `pas_compute_output` branches that need a second motor or a
+board this build is not.
 
 ### The fuzzer
 

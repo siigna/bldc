@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <setjmp.h>
 #include <math.h>
 
 #include "datatypes.h"
@@ -2194,6 +2195,418 @@ static void test_negative_scaling_cannot_brake(void) {
 	app_pas_set_current_sub_scaling(1.0);
 }
 
+// --- The thread, and the terminal commands -------------------------------
+//
+// Coverage put these at zero: the three terminal commands are 214 of the
+// file's 680 lines and the thread another 34. They are not pure arithmetic, so
+// they were left out at first, but they are not glue either -- the thread holds
+// the safe-start interlock, the fault check and the output-disabled path, and
+// each of those decides whether the motor gets current.
+
+extern void (*test_thread_fn)(void *);
+extern void (*test_on_sleep)(void);
+extern const char *test_cmd_name[];
+extern void (*test_cmd_fn[])(int argc, const char **argv);
+extern int test_cmd_count;
+extern char test_out[];
+extern void test_out_clear(void);
+
+// Leaving the loop is the awkward part. The thread exits when stop_now is set,
+// and the only thing that sets it is app_pas_stop -- which then spins on
+// chThdSleepMilliseconds until the thread clears is_running. Called from inside
+// the thread that would be a deadlock, and the first attempt at this recursed
+// through the sleep hook until the stack ran out. AddressSanitizer named it in
+// one run where the plain build only segfaulted.
+//
+// So the hook jumps out instead. That leaves is_running true, which is exactly
+// what it is on real hardware while the thread runs, and means nothing may call
+// app_pas_stop afterwards -- which is why this test runs last.
+static int thread_sleeps_left = 0;
+static jmp_buf thread_escape;
+
+static void thread_sleep_hook(void) {
+	if (--thread_sleeps_left <= 0) {
+		longjmp(thread_escape, 1);
+	}
+}
+
+// Run the app's own thread for n iterations.
+static void run_thread(int n) {
+	thread_sleeps_left = n;
+	test_on_sleep = thread_sleep_hook;
+	if (setjmp(thread_escape) == 0) {
+		test_thread_fn(0);
+	}
+	test_on_sleep = 0;
+}
+
+static void (*find_cmd(const char *name))(int, const char **) {
+	for (int i = 0; i < test_cmd_count; i++) {
+		if (test_cmd_name[i] && strcmp(test_cmd_name[i], name) == 0) {
+			return test_cmd_fn[i];
+		}
+	}
+	return 0;
+}
+
+static void call_cmd(const char *name, int argc, const char **argv) {
+	void (*fn)(int, const char **) = find_cmd(name);
+	test_out_clear();
+	if (fn) {
+		fn(argc, argv);
+	}
+}
+
+static bool out_has(const char *needle) {
+	return strstr(test_out, needle) != 0;
+}
+
+static void test_thread_loop(void) {
+	printf("thread loop\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_CADENCE;
+	setup(&c);
+
+	test_appconf.app_to_use = APP_PAS;
+	test_fault = FAULT_CODE_NONE;
+	app_pas_start(true);
+	check(test_thread_fn != 0, "the thread entry point was registered");
+
+	// Safe start: the output must stay at zero until it has been zero for long
+	// enough, so a display that comes up with the cranks already turning
+	// cannot hand the motor current immediately.
+	//
+	// Note what it actually does: the interlock zeroes the published value and
+	// skips the rest of the iteration, so mc_interface_set_current_rel is not
+	// called at all rather than called with zero. The sentinel checks that,
+	// which is the stronger statement -- nothing else can be driving the motor
+	// through this app while the interlock holds.
+	pedal(60.0, 12);
+	test_current_rel = -1.0;
+	run_thread(3);
+	check_near(test_current_rel, -1.0, 0.0001,
+			"safe start does not write the motor at all");
+	check_near(app_pas_get_current_target_rel(), 0.0, 0.0001,
+			"and publishes zero for the throttle app to read");
+
+	// Given enough idle iterations the interlock clears and pedalling reaches
+	// the motor.
+	app_pas_start(true);
+	run_thread(400);
+	pedal(60.0, 12);
+	app_pas_start(true);
+	run_thread(20);
+	check(app_pas_get_current_target_rel() > 0.0,
+			"assist reaches the output once safe start has cleared");
+	check(test_current_rel > 0.0, "and is written to the motor");
+
+	// A fault resets the interlock, which is the whole point of it: the motor
+	// must not pick up again the instant a fault clears.
+	test_fault = FAULT_CODE_OVER_VOLTAGE;
+	app_pas_start(true);
+	pedal(60.0, 12);
+	test_current_rel = -1.0;
+	run_thread(3);
+	check_near(test_current_rel, -1.0, 0.0001,
+			"a fault stops the motor being written");
+	check_near(app_pas_get_current_target_rel(), 0.0, 0.0001,
+			"and publishes zero while it stands");
+	test_fault = FAULT_CODE_NONE;
+
+	// Not the primary output: the value is still published for app_adc to read
+	// but nothing is written to the motor.
+	app_pas_start(false);
+	run_thread(400);
+	pedal(60.0, 12);
+	app_pas_start(false);
+	run_thread(20);
+	test_current_rel = -1.0;
+	pedal(60.0, 12);
+	app_pas_start(false);
+	run_thread(20);
+	check_near(test_current_rel, -1.0, 0.0001,
+			"nothing is written to the motor when PAS is not primary");
+	check(app_pas_get_current_target_rel() > 0.0,
+			"but the value is still published");
+
+	// is_running is set by the thread on entry, and this is the only place it
+	// is ever true in a host test.
+	check(app_pas_is_running(), "the thread sets is_running");
+
+	// Deliberately not stopped. The exit path clears is_running, but reaching
+	// it means letting the loop see stop_now, and the only setter for that
+	// waits for a thread that would have to be this one. That path needs a
+	// scheduler, so it stays uncovered and this test runs last.
+	test_appconf.app_to_use = APP_NONE;
+}
+
+// The flag bits, one condition at a time. These are the whole of what a
+// display can say about why assist is not what the rider expects -- the dash
+// turns them into its status word -- so a bit set from the wrong condition
+// would have it reporting the wrong fault with no way to tell from the outside.
+static void test_flag_bits(void) {
+	printf("flag bits\n");
+
+	// A channel that does not exist on this hardware, which is the one every
+	// board hits if it is configured for a sensor it has no pin for.
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_TORQUE;
+	c.torque_source = PAS_TORQUE_SRC_ADC;
+	c.torque_adc_ch = PAS_TORQUE_ADC_EXT8;
+	setup(&c);
+	pas_compute_output(2.0);
+	check(app_pas_get_flags() & PAS_FLAG_TORQUE_CH_INVALID,
+			"an impossible torque channel raises TORQUE_CH_INVALID");
+
+	c = base_config();
+	c.brake_source = PAS_BRAKE_SRC_ADC;
+	c.brake_adc_ch = PAS_TORQUE_ADC_EXT8;
+	setup(&c);
+	pas_compute_output(2.0);
+	check(app_pas_get_flags() & PAS_FLAG_BRAKE_CH_INVALID,
+			"an impossible brake channel raises BRAKE_CH_INVALID");
+
+	c = base_config();
+	c.walk_source = PAS_WALK_SRC_ADC;
+	c.walk_adc_ch = PAS_TORQUE_ADC_EXT8;
+	setup(&c);
+	pas_compute_output(2.0);
+	check(app_pas_get_flags() & PAS_FLAG_WALK_CH_INVALID,
+			"an impossible walk channel raises WALK_CH_INVALID");
+
+	// A sensor type the build has no decoder for.
+	c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_TORQUE;
+	c.torque_source = PAS_TORQUE_SRC_HW;
+	c.torque_max_nm = 140.0;
+	setup(&c);
+	pedal(60.0, 12);
+	pas_compute_output(2.0);
+	// On a board without hw_get_PAS_torque the override is not compiled in,
+	// so asking for it has to be reported rather than silently read as zero.
+#ifndef TEST_TORQUE_SENSOR
+	check(app_pas_get_flags() & PAS_FLAG_TORQUE_SRC_UNSUPPORTED,
+			"asking for a hardware torque source it does not have is reported");
+#else
+	check(!(app_pas_get_flags() & PAS_FLAG_TORQUE_SRC_UNSUPPORTED),
+			"a board with the hardware torque source does not report it missing");
+#endif
+
+	// The brake, engaged through the channel that does exist.
+	c = base_config();
+	c.brake_source = PAS_BRAKE_SRC_ADC;
+	c.brake_adc_ch = PAS_TORQUE_ADC_EXT3;
+	c.brake_threshold_v = 1.0;
+	setup(&c);
+	// ADC_IND_EXT3, not 3: the channel enum is not the array index, and the
+	// stub hw.h reproduces the aliasing the real hwconf/hw.h does.
+	set_adc_volts(ADC_IND_EXT3, 2.0);
+	pedal(60.0, 12);
+	pas_compute_output(2.0);
+	check(app_pas_get_flags() & PAS_FLAG_BRAKE_ENGAGED,
+			"an engaged brake raises BRAKE_ENGAGED");
+	set_adc_volts(ADC_IND_EXT3, 0.0);
+
+	// The speed taper, which is the flag the dash shows as "splim".
+	c = base_config();
+	c.taper_start_kmh = 20.0;
+	c.taper_end_kmh = 30.0;
+	setup(&c);
+	test_speed = 25.0 / 3.6;
+	pedal(60.0, 12);
+	pas_compute_output(2.0);
+	check(app_pas_get_flags() & PAS_FLAG_SPEED_LIMITED,
+			"riding inside the taper raises SPEED_LIMITED");
+	test_speed = 0.0;
+
+	// And nothing set at all, which is the state a working bike is in: a flag
+	// word that is never zero would make the dash cry wolf for a whole ride.
+	c = base_config();
+	setup(&c);
+	pedal(60.0, 12);
+	pas_compute_output(2.0);
+	check(app_pas_get_flags() == 0, "a working configuration raises no flags");
+}
+
+// Walk assist can be asked for from a script or from an ADC channel, and the
+// two paths share nothing. The lisp one expires on its own, which is what stops
+// a display that has lost power from leaving the motor driving.
+static void test_walk_sources(void) {
+	printf("walk sources\n");
+
+	pas_config c = base_config();
+	c.walk_source = PAS_WALK_SRC_LISP;
+	c.walk_max_kmh = 6.0;
+	c.walk_current = 0.2;
+	setup(&c);
+
+	check_near(pas_compute_output(2.0), 0.0, 0.0001, "no walk without a request");
+
+	app_pas_walk_set(true);
+	check(pas_compute_output(2.0) > 0.0, "a script request starts walk assist");
+	check(app_pas_get_flags() & PAS_FLAG_WALK_ACTIVE, "and raises WALK_ACTIVE");
+
+	// Expiry. The controller must not keep walking because a display stopped
+	// talking, so the request is good for WALK_LISP_TIMEOUT_S and no longer.
+	test_now += (systime_t)(CH_CFG_ST_FREQUENCY * 2);
+	check_near(pas_compute_output(2.0), 0.0, 0.0001,
+			"an unrefreshed script request expires");
+
+	app_pas_walk_set(false);
+	check_near(pas_compute_output(2.0), 0.0, 0.0001, "and a release stops it");
+
+	// The ADC source, on a channel that exists, with and without inversion.
+	c = base_config();
+	c.walk_source = PAS_WALK_SRC_ADC;
+	c.walk_adc_ch = PAS_TORQUE_ADC_EXT3;
+	c.walk_threshold_v = 1.0;
+	c.walk_max_kmh = 6.0;
+	c.walk_current = 0.2;
+	setup(&c);
+
+	set_adc_volts(ADC_IND_EXT3, 0.2);
+	check_near(pas_compute_output(2.0), 0.0, 0.0001, "below the threshold, no walk");
+	set_adc_volts(ADC_IND_EXT3, 2.0);
+	check(pas_compute_output(2.0) > 0.0, "above the threshold, walk");
+
+	c.walk_invert = true;
+	setup(&c);
+	set_adc_volts(ADC_IND_EXT3, 2.0);
+	check_near(pas_compute_output(2.0), 0.0, 0.0001,
+			"inverted: above the threshold is no walk");
+	set_adc_volts(ADC_IND_EXT3, 0.2);
+	check(pas_compute_output(2.0) > 0.0, "inverted: below it is walk");
+
+	set_adc_volts(ADC_IND_EXT3, 0.0);
+}
+
+static void test_terminal_commands(void) {
+	printf("terminal commands\n");
+	pas_config c = base_config();
+	c.ctrl_type = PAS_CTRL_TYPE_POWER;
+	c.sensor_type = PAS_SENSOR_TYPE_QUADRATURE;
+	setup(&c);
+
+	test_appconf.app_to_use = APP_PAS;
+	app_pas_start(true);
+
+	check(find_cmd("pas_status") != 0, "pas_status is registered");
+	check(find_cmd("pas_torque") != 0, "pas_torque is registered");
+	check(find_cmd("pas_preset") != 0, "pas_preset is registered");
+
+	// pas_status is the command a rider runs on the bench before riding, so
+	// what it says matters more than that it runs. It must report the control
+	// type, whether the app is running, and the pin and sensor situation.
+	pedal(60.0, 12);
+	pas_compute_output(2.0);
+	call_cmd("pas_status", 1, 0);
+	check(out_has("PAS running"), "pas_status reports whether it is running");
+	check(out_has("Control type"), "pas_status reports the control type");
+	check(out_has("Pedal RPM"), "pas_status reports the pedal rpm");
+	check(out_has("Start period"), "pas_status reports the derived periods");
+
+	// pas_torque. With no torque source configured it has to say so rather
+	// than print a plausible zero, which a rider on the bench would read as
+	// "the sensor is connected and reading nothing".
+	call_cmd("pas_torque", 1, 0);
+	check(out_has("not set to ADC"), "pas_torque says when there is no ADC source");
+
+	// A channel this hardware does not have, which is the next thing a
+	// misconfigured bench setup hits.
+	pas_config t = base_config();
+	t.torque_source = PAS_TORQUE_SRC_ADC;
+	t.torque_adc_ch = PAS_TORQUE_ADC_EXT8;
+	setup(&t);
+	app_pas_start(true);
+	call_cmd("pas_torque", 1, 0);
+	check(out_has("not available on this hardware"),
+			"pas_torque names an impossible channel");
+
+	// A real channel with a real voltage on it. This is the reading the bench
+	// procedure depends on, so the numbers have to be there.
+	t.torque_adc_ch = PAS_TORQUE_ADC_EXT3;
+	t.torque_zero_v = 1.5;
+	t.torque_nm_per_v = 70.0;
+	t.torque_max_nm = 140.0;
+	setup(&t);
+	app_pas_start(true);
+	set_adc_volts(ADC_IND_EXT3, 2.0);
+	call_cmd("pas_torque", 1, 0);
+	check(out_has("ADC channel"), "pas_torque reports which channel");
+	check(out_has("Voltage"), "and the raw voltage");
+	check(out_has("Nm"), "and the decoded torque");
+
+	// Saturation has to be called out: a sensor pinned at the top of the ADC
+	// range reads as maximum effort and would otherwise look like hard
+	// pedalling rather than a wiring problem.
+	set_adc_volts(ADC_IND_EXT3, 3.3);
+	call_cmd("pas_torque", 1, 0);
+	check(out_has("SATURATED"), "pas_torque reports a saturated reading");
+
+	// The zero-point form averages a second of samples. The spread is the
+	// useful part -- it is how a rider tells a noisy channel from a quiet one.
+	set_adc_volts(ADC_IND_EXT3, 1.52);
+	const char *argv_zero[] = {"pas_torque", "zero"};
+	call_cmd("pas_torque", 2, argv_zero);
+	check(out_has("Mean"), "pas_torque zero reports the mean");
+	check(out_has("Spread"), "and the spread");
+	check(out_has("1.52"), "and the mean is the voltage that was there");
+	check(out_has("does not write"),
+			"and says it has not written the configuration");
+
+	set_adc_volts(ADC_IND_EXT3, 0.0);
+
+	// Back to the configuration the rest of this test expects.
+	setup(&c);
+	app_pas_start(true);
+
+	// The preset prints by default and writes only with "store", which is the
+	// behaviour worth pinning: it is a configuration change to a vehicle, and
+	// a rider exploring the command must not have applied one by typing it.
+	memset(&test_appconf, 0, sizeof(test_appconf));
+	const char *argv_preset[] = {"pas_preset", "pedelec"};
+	call_cmd("pas_preset", 2, argv_preset);
+	check(out_has("Pedelec preset"), "the preset prints what it would set");
+	check(out_has("25 km/h"), "including the speed cutoff");
+	check(out_has("250 W"), "and the power cap");
+	check(out_has("Not written"), "and says it has not written anything");
+	check_near(test_appconf.app_pas_conf.taper_end_kmh, 0.0, 0.01,
+			"and really has not");
+
+	// It also refuses to claim compliance, which is deliberate wording rather
+	// than decoration.
+	check(out_has("not a statement"), "the preset does not claim compliance");
+
+	// With "store" it writes, and the well-known numbers are the point of it.
+	const char *argv_store[] = {"pas_preset", "pedelec", "store"};
+	call_cmd("pas_preset", 3, argv_store);
+	check_near(test_appconf.app_pas_conf.taper_start_kmh, 25.0, 0.01,
+			"stored: the taper starts at 25 km/h");
+	check_near(test_appconf.app_pas_conf.taper_end_kmh, 25.0, 0.01,
+			"stored: and ends there, so the cutoff is abrupt");
+	check_near(test_appconf.app_pas_conf.power_max_w, 250.0, 0.01,
+			"stored: the power cap is 250 W");
+	check(test_appconf.app_pas_conf.pedal_stop_hard, "stored: pedal stop is hard");
+
+	// An unknown preset must be refused rather than applying a partial one.
+	pas_config before = test_appconf.app_pas_conf;
+	const char *argv_bad[] = {"pas_preset", "nonsense"};
+	call_cmd("pas_preset", 2, argv_bad);
+	check(memcmp(&before, &test_appconf.app_pas_conf, sizeof(pas_config)) == 0,
+			"an unknown preset changes nothing");
+	check(out_has("Usage"), "and prints its usage");
+
+	// No argument at all, which is how a rider first finds the command.
+	call_cmd("pas_preset", 1, 0);
+	check(out_has("Usage"), "pas_preset with no argument prints its usage");
+
+	// Stopping unregisters them, or a second start would register duplicates.
+	app_pas_stop();
+    check(find_cmd("pas_status") == 0, "stopping unregisters pas_status");
+
+	test_appconf.app_to_use = APP_NONE;
+}
+
 int main(void) {
 	memset(&test_appconf, 0, sizeof(test_appconf));
 	memset(&test_mcconf, 0, sizeof(test_mcconf));
@@ -2277,6 +2690,15 @@ int main(void) {
 	test_power_closed_loop_settles();
 	test_power_closed_loop_antiwindup();
 	test_power_closed_loop_needs_primary();
+
+	// These two go last on purpose. The terminal tests write the stored
+	// configuration, and the thread test leaves the app's thread notionally
+	// running because its exit path cannot be driven from here -- see
+	// run_thread. Either would disturb a test that ran after them.
+	test_flag_bits();
+	test_walk_sources();
+	test_terminal_commands();
+	test_thread_loop();
 #endif
 
 	printf("\n%d checks, %d failures\n", checks, failures);
