@@ -2598,6 +2598,66 @@ static void test_terminal_commands(void) {
 			"stored: the power cap is 250 W");
 	check(test_appconf.app_pas_conf.pedal_stop_hard, "stored: pedal stop is hard");
 
+	// The eRider preset. Its numbers come from a datasheet and the arithmetic
+	// between them is the part worth pinning: 14.7 mV/Nm inverts to 68.03 Nm/V,
+	// and 1.5 V of span at that scale is 102 Nm. A typo in either would be
+	// invisible on a bench -- assist would simply be wrong by a constant.
+	memset(&test_appconf, 0, sizeof(test_appconf));
+	const char *argv_er[] = {"pas_preset", "erider"};
+	call_cmd("pas_preset", 2, argv_er);
+	check(out_has("eRider"), "the erider preset prints what it would set");
+	check(out_has("68.03"), "including the scale it derives from 14.7 mV/Nm");
+	check(out_has("102"), "and the full scale that follows from the span");
+	check(out_has("quadrature"), "and that the sensor is quadrature");
+	check(out_has("Not written"), "and says it has not written anything");
+	check_near(test_appconf.app_pas_conf.torque_nm_per_v, 0.0, 0.01,
+			"and really has not");
+
+	// It has to say what it cannot know, or a rider follows the preset and
+	// then wonders why there is no torque reading.
+	check(out_has("ADC Channel") || out_has("ADC channel"),
+			"the preset says the torque channel is not set for you");
+	check(out_has("pas_torque zero"), "and points at measuring the zero");
+	check(out_has("divider"), "and warns about the speed signal level");
+
+	const char *argv_er_store[] = {"pas_preset", "erider", "store"};
+	call_cmd("pas_preset", 3, argv_er_store);
+	check(test_appconf.app_pas_conf.sensor_type == PAS_SENSOR_TYPE_QUADRATURE,
+			"stored: quadrature, since it has two speed channels");
+	check_near(test_appconf.app_pas_conf.magnets, 18, 0.01,
+			"stored: 18 cycles per crank revolution");
+	check(test_appconf.app_pas_conf.torque_source == PAS_TORQUE_SRC_ADC,
+			"stored: the torque comes from an ADC channel");
+	check_near(test_appconf.app_pas_conf.torque_zero_v, 1.50, 0.001,
+			"stored: the datasheet zero");
+	check_near(test_appconf.app_pas_conf.torque_nm_per_v, 68.03, 0.01,
+			"stored: 1000 / 14.7 mV per Nm");
+	check_near(test_appconf.app_pas_conf.torque_max_nm, 102.0, 0.5,
+			"stored: 1.5 V of span at that scale");
+	check_near(test_appconf.app_pas_conf.torque_avg_pulses, 18, 0.01,
+			"stored: averaged over exactly one crank revolution");
+	check(test_appconf.app_pas_conf.ctrl_type == PAS_CTRL_TYPE_POWER,
+			"stored: a control type that uses the torque");
+
+	// The scale and the full scale have to agree, or one of them is a typo.
+	check_near(test_appconf.app_pas_conf.torque_max_nm,
+			1.5 * test_appconf.app_pas_conf.torque_nm_per_v, 0.5,
+			"the full scale is the span times the scale");
+
+	// And the two presets are independent. A rider will apply both -- one is
+	// limits, the other is what the sensor is -- and each must leave the
+	// other's fields alone.
+	call_cmd("pas_preset", 3, argv_store);
+	check_near(test_appconf.app_pas_conf.torque_nm_per_v, 68.03, 0.01,
+			"the pedelec preset leaves the sensor calibration alone");
+	check_near(test_appconf.app_pas_conf.power_max_w, 250.0, 0.01,
+			"and applies its own limits");
+	call_cmd("pas_preset", 3, argv_er_store);
+	check_near(test_appconf.app_pas_conf.power_max_w, 250.0, 0.01,
+			"and the erider preset leaves the limits alone");
+	check_near(test_appconf.app_pas_conf.taper_end_kmh, 25.0, 0.01,
+			"including the speed cutoff");
+
 	// An unknown preset must be refused rather than applying a partial one.
 	// The four fields the preset writes, rather than memcmp over the struct:
 	// pas_config has padding, whose bytes are unspecified, so a comparison of
@@ -2616,6 +2676,8 @@ static void test_terminal_commands(void) {
 	// No argument at all, which is how a rider first finds the command.
 	call_cmd("pas_preset", 1, 0);
 	check(out_has("Usage"), "pas_preset with no argument prints its usage");
+	check(out_has("pedelec") && out_has("erider"),
+			"and lists both presets, or one of them is undiscoverable");
 
 	// pas_status under a fully configured setup, which is what reaches the
 	// advisory branches. Half the command is conditional diagnostics, and they

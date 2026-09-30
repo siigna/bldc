@@ -76,6 +76,58 @@ misrepresents the sensor low-pass, and will show a residual that the board would
 not. `cycle_fwd_with_control` interleaves them at a realistic ratio; use it
 rather than driving pulses and the control law in separate loops.
 
+## Presets
+
+`pas_preset` has two, and they are **independent**: `pedelec` sets limits,
+`erider` sets what the sensor is. Each writes only its own fields on a copy of
+the running configuration, so applying both keeps both -- which a rider will do,
+and which the tests check in both orders.
+
+Both print by default and write only with `store`. That matters more than it
+looks: a preset is a configuration change to a vehicle, and a rider exploring
+the command must not have applied one by typing it.
+
+### The eRider numbers
+
+From the GTL-T17-73 datasheet, with the arithmetic done here rather than by
+whoever is reading it at a bench:
+
+| datasheet | preset |
+|---|---|
+| Torque ratio 14.7 mV/Nm | 68.03 Nm/V |
+| Output 1.50 to 3.00 V | 1.5 V of span, so 102 Nm full scale |
+| Vo 1.50 ± 0.05 V | torque zero 1.50 V |
+| 18 square waves per rotation, two channels | quadrature, 18 magnets |
+
+The full scale agrees with the other figure the datasheet gives -- 60 kgf of
+pedal force, which on the 170 mm crank it is specified against is 100 Nm. Two
+independent numbers landing in the same place is what makes them worth
+trusting, and `test_terminal_commands` asserts that the stored full scale is
+the span times the scale, since a typo in either would be invisible on a bench:
+assist would simply be wrong by a constant.
+
+None of it depends on the crank actually fitted. The ratio is torque per volt;
+crank length only changes how much pedal force reaches full scale.
+
+3.00 V sits under every ADC reference in the tree -- 91 % of 3.3 V on a
+Flipsky, 87 % of 3.44 V on a Ubox -- so no divider is needed for the torque
+line and the saturation flag stays a fault detector rather than an expected
+condition.
+
+### What it deliberately does not set
+
+The **torque ADC channel**, because only the wiring knows which input it is on.
+The command says so, and says to run `pas_status` afterwards to confirm the
+channel exists and reads a voltage.
+
+It also tells the rider two things it cannot do for them. The zero needs
+measuring with `pas_torque zero`: the datasheet tolerance is ±0.05 V, which is
+**3.4 Nm** at this scale -- larger than the default 2 Nm deadband, so a unit at
+the edge of tolerance gives either phantom assist at rest or a dead zone. And
+the speed outputs are specified as square waves rather than open collector, so
+their high level wants checking before they reach a 3.3 V pin: this sensor runs
+on 5 to 15 V.
+
 ## Beyond `make run`
 
 `tests/check.sh` at the top of the tree runs all of this in one go, and is what

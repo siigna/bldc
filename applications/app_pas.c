@@ -771,38 +771,56 @@ static bool pas_pins_available(void) {
 #define PEDELEC_CUTOFF_KMH		25.0
 #define PEDELEC_POWER_W			250.0
 
-static void terminal_pas_preset(int argc, const char **argv) {
-	if (argc < 2 || strcmp(argv[1], "pedelec") != 0) {
-		commands_printf("Usage: pas_preset pedelec [store]");
-		commands_printf("Prints the values the preset would set. Add \"store\" to write them.");
-		commands_printf(" ");
-		return;
-	}
+/*
+ * The eRider GTL-T17-73 torque bottom bracket, from its datasheet.
+ *
+ * Torque ratio 14.7 mV/Nm inverts to 68.03 Nm/V, and the 1.50 to 3.00 V output
+ * range gives 1.5 V of span, so full scale is 102 Nm. That agrees with the
+ * other figure the datasheet gives, 60 kgf of pedal force, which on the 170 mm
+ * crank it is specified against is 100 Nm -- two independent numbers landing in
+ * the same place is what makes them worth trusting. None of it depends on the
+ * crank actually fitted: the ratio is torque per volt, and crank length only
+ * changes how much pedal force reaches full scale.
+ *
+ * 3.00 V sits under every ADC reference in the tree -- 91 % of 3.3 V on a
+ * Flipsky, 87 % of 3.44 V on a Ubox -- so no divider is needed and the
+ * saturation flag stays a fault detector rather than an expected condition.
+ *
+ * 18 square waves per rotation on each of two channels is quadrature with 18
+ * cycles per crank revolution, which is what magnets counts.
+ */
+#define ERIDER_NM_PER_V			68.03		// 1000 / 14.7 mV per Nm
+#define ERIDER_MAX_NM			102.0		// 1.5 V of span at that ratio
+#define ERIDER_ZERO_V			1.50		// datasheet Vo, +/- 0.05
+#define ERIDER_MAGNETS			18
+#define ERIDER_ZERO_TOL_V		0.05
 
-	const bool store = (argc >= 3 && strcmp(argv[2], "store") == 0);
+static void pas_preset_apply_pedelec(volatile pas_config *c) {
+	c->taper_start_kmh = PEDELEC_CUTOFF_KMH;
+	c->taper_end_kmh = PEDELEC_CUTOFF_KMH;
+	c->power_max_w = PEDELEC_POWER_W;
+	c->pedal_stop_hard = true;
+}
 
-	commands_printf("Pedelec preset:");
-	commands_printf("  Speed cutoff      : %.0f km/h (taper start and end equal)",
-			(double)PEDELEC_CUTOFF_KMH);
-	commands_printf("  Power cap         : %.0f W", (double)PEDELEC_POWER_W);
-	commands_printf("  Pedal stop        : hard cut");
-	commands_printf(" ");
-	commands_printf("These are the well known numbers, not a statement that an installation");
-	commands_printf("is compliant. That depends on the whole vehicle and how it is used.");
-	commands_printf(" ");
-	commands_printf("Note that the speed cutoff is only as good as the speed reading, which");
-	commands_printf("comes from the motor RPM and the configured pole count, wheel diameter");
-	commands_printf("and gear ratio unless the hardware has a wheel speed sensor.");
-	commands_printf(" ");
-	commands_printf("There is no walk assist mode, so the preset sets no walk speed limit.");
-	commands_printf(" ");
+static void pas_preset_apply_erider(volatile pas_config *c) {
+	c->sensor_type = PAS_SENSOR_TYPE_QUADRATURE;
+	c->magnets = ERIDER_MAGNETS;
+	c->torque_source = PAS_TORQUE_SRC_ADC;
+	c->torque_zero_v = ERIDER_ZERO_V;
+	c->torque_nm_per_v = ERIDER_NM_PER_V;
+	c->torque_max_nm = ERIDER_MAX_NM;
+	c->torque_avg_pulses = ERIDER_MAGNETS;
+	c->ctrl_type = PAS_CTRL_TYPE_POWER;
+}
 
-	if (!store) {
-		commands_printf("Not written. Add \"store\" to apply and save.");
-		commands_printf(" ");
-		return;
-	}
-
+/*
+ * Write one preset.
+ *
+ * Each preset touches only its own fields, on a copy of the running
+ * configuration, so applying both leaves both in place: one sets limits and the
+ * other sets what the sensor is, and neither has an opinion about the other.
+ */
+static void pas_preset_write(void (*apply)(volatile pas_config *)) {
 	app_configuration *appconf = mempools_alloc_appconf();
 
 	if (appconf == 0) {
@@ -812,10 +830,7 @@ static void terminal_pas_preset(int argc, const char **argv) {
 	}
 
 	*appconf = *app_get_configuration();
-	appconf->app_pas_conf.taper_start_kmh = PEDELEC_CUTOFF_KMH;
-	appconf->app_pas_conf.taper_end_kmh = PEDELEC_CUTOFF_KMH;
-	appconf->app_pas_conf.power_max_w = PEDELEC_POWER_W;
-	appconf->app_pas_conf.pedal_stop_hard = true;
+	apply(&appconf->app_pas_conf);
 
 	if (conf_general_store_app_configuration(appconf)) {
 		app_set_configuration(appconf);
@@ -826,6 +841,102 @@ static void terminal_pas_preset(int argc, const char **argv) {
 
 	mempools_free_appconf(appconf);
 	commands_printf(" ");
+}
+
+static void pas_preset_usage(void) {
+	commands_printf("Usage: pas_preset <name> [store]");
+	commands_printf("Prints the values the preset would set. Add \"store\" to write them.");
+	commands_printf(" ");
+	commands_printf("  pedelec  speed cutoff and power cap, and a hard pedal stop");
+	commands_printf("  erider   the eRider GTL-T17-73 torque bottom bracket");
+	commands_printf(" ");
+	commands_printf("They are independent: one sets limits, the other sets what the sensor");
+	commands_printf("is, and applying both keeps both.");
+	commands_printf(" ");
+}
+
+static void terminal_pas_preset(int argc, const char **argv) {
+	if (argc < 2) {
+		pas_preset_usage();
+		return;
+	}
+
+	const bool store = (argc >= 3 && strcmp(argv[2], "store") == 0);
+
+	if (strcmp(argv[1], "pedelec") == 0) {
+		commands_printf("Pedelec preset:");
+		commands_printf("  Speed cutoff      : %.0f km/h (taper start and end equal)",
+				(double)PEDELEC_CUTOFF_KMH);
+		commands_printf("  Power cap         : %.0f W", (double)PEDELEC_POWER_W);
+		commands_printf("  Pedal stop        : hard cut");
+		commands_printf(" ");
+		commands_printf("These are the well known numbers, not a statement that an installation");
+		commands_printf("is compliant. That depends on the whole vehicle and how it is used.");
+		commands_printf(" ");
+		commands_printf("Note that the speed cutoff is only as good as the speed reading, which");
+		commands_printf("comes from the motor RPM and the configured pole count, wheel diameter");
+		commands_printf("and gear ratio unless the hardware has a wheel speed sensor.");
+		commands_printf(" ");
+		commands_printf("There is no walk assist mode, so the preset sets no walk speed limit.");
+		commands_printf(" ");
+
+		if (!store) {
+			commands_printf("Not written. Add \"store\" to apply and save.");
+			commands_printf(" ");
+			return;
+		}
+
+		pas_preset_write(pas_preset_apply_pedelec);
+		return;
+	}
+
+	if (strcmp(argv[1], "erider") == 0) {
+		commands_printf("eRider GTL-T17-73 preset:");
+		commands_printf("  Sensor type       : quadrature");
+		commands_printf("  Magnets           : %d  (18 square waves per rotation, two channels)",
+				ERIDER_MAGNETS);
+		commands_printf("  Torque source     : ADC");
+		commands_printf("  Torque zero       : %.2f V", (double)ERIDER_ZERO_V);
+		commands_printf("  Torque scale      : %.2f Nm/V  (14.7 mV/Nm)",
+				(double)ERIDER_NM_PER_V);
+		commands_printf("  Torque max        : %.0f Nm  (1.5 V of span at that scale)",
+				(double)ERIDER_MAX_NM);
+		commands_printf("  Torque averaging  : %d pulses, one crank revolution",
+				ERIDER_MAGNETS);
+		commands_printf("  Control type      : power");
+		commands_printf(" ");
+		commands_printf("The control type is included because a torque sensor with a cadence");
+		commands_printf("control type ignores the torque entirely, which is a confusing way to");
+		commands_printf("start. Change it afterwards if you want something else.");
+		commands_printf(" ");
+		commands_printf("NOT set, because only the wiring knows: the torque ADC channel. Set");
+		commands_printf("PAS Torque ADC Channel to whichever input the torque wire is on, then");
+		commands_printf("run \"pas_status\" to confirm the channel exists and reads a voltage.");
+		commands_printf(" ");
+		commands_printf("Then run \"pas_torque zero\" with no force on the cranks. The datasheet");
+		commands_printf("zero is %.2f V +/- %.2f, and %.2f V is %.1f Nm at this scale -- more than",
+				(double)ERIDER_ZERO_V, (double)ERIDER_ZERO_TOL_V,
+				(double)ERIDER_ZERO_TOL_V,
+				(double)(ERIDER_ZERO_TOL_V * ERIDER_NM_PER_V));
+		commands_printf("the default deadband, so a unit at the edge of tolerance gives either");
+		commands_printf("phantom assist at rest or a dead zone. Measuring it takes a second.");
+		commands_printf(" ");
+		commands_printf("The speed outputs are specified as square waves, so check their high");
+		commands_printf("level before wiring them to a pin: this sensor runs on 5 to 15 V and a");
+		commands_printf("5 V output needs a divider to reach a 3.3 V input safely.");
+		commands_printf(" ");
+
+		if (!store) {
+			commands_printf("Not written. Add \"store\" to apply and save.");
+			commands_printf(" ");
+			return;
+		}
+
+		pas_preset_write(pas_preset_apply_erider);
+		return;
+	}
+
+	pas_preset_usage();
 }
 
 static void terminal_pas_torque(int argc, const char **argv) {
@@ -1119,8 +1230,8 @@ void app_pas_start(bool is_primary_output) {
 
 	terminal_register_command_callback(
 			"pas_preset",
-			"Apply a PAS preset. Currently \"pedelec\".",
-			"pedelec [store]",
+			"Apply a PAS preset: \"pedelec\" limits, \"erider\" sensor calibration.",
+			"<pedelec|erider> [store]",
 			terminal_pas_preset);
 
 	terminal_register_command_callback(
