@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <setjmp.h>
+#include "sched.h"
 #include <math.h>
 
 #include "datatypes.h"
@@ -2207,42 +2207,23 @@ static void test_negative_scaling_cannot_brake(void) {
 // they were left out at first, but they are not glue either -- the thread holds
 // the safe-start interlock, the fault check and the output-disabled path, and
 // each of those decides whether the motor gets current.
+//
+// The thread runs on the cooperative scheduler in sched.h, which is what makes
+// its stop path reachable as well as its loop.
 
-extern void (*test_thread_fn)(void *);
-extern void (*test_on_sleep)(void);
 extern const char *test_cmd_name[];
 extern void (*test_cmd_fn[])(int argc, const char **argv);
 extern int test_cmd_count;
 extern char test_out[];
 extern void test_out_clear(void);
 
-// Leaving the loop is the awkward part. The thread exits when stop_now is set,
-// and the only thing that sets it is app_pas_stop -- which then spins on
-// chThdSleepMilliseconds until the thread clears is_running. Called from inside
-// the thread that would be a deadlock, and the first attempt at this recursed
-// through the sleep hook until the stack ran out. AddressSanitizer named it in
-// one run where the plain build only segfaulted.
-//
-// So the hook jumps out instead. That leaves is_running true, which is exactly
-// what it is on real hardware while the thread runs, and means nothing may call
-// app_pas_stop afterwards -- which is why this test runs last.
-static int thread_sleeps_left = 0;
-static jmp_buf thread_escape;
-
-static void thread_sleep_hook(void) {
-	if (--thread_sleeps_left <= 0) {
-		longjmp(thread_escape, 1);
-	}
-}
-
-// Run the app's own thread for n iterations.
+// Run the app's thread up to n of its sleeps. Each switch resumes it where it
+// last slept, so this is n iterations of its loop, deterministically and with
+// the test in control between each one. See sched.h.
 static void run_thread(int n) {
-	thread_sleeps_left = n;
-	test_on_sleep = thread_sleep_hook;
-	if (setjmp(thread_escape) == 0) {
-		test_thread_fn(0);
+	for (int i = 0; i < n && sched_alive(); i++) {
+		sched_switch();
 	}
-	test_on_sleep = 0;
 }
 
 static void (*find_cmd(const char *name))(int, const char **) {
@@ -2275,7 +2256,8 @@ static void test_thread_loop(void) {
 	test_appconf.app_to_use = APP_PAS;
 	test_fault = FAULT_CODE_NONE;
 	app_pas_start(true);
-	check(test_thread_fn != 0, "the thread entry point was registered");
+	check(sched_alive(), "starting the app created a thread");
+	check(!app_pas_is_running(), "which has not run yet, so is_running is false");
 
 	// Safe start: the output must stay at zero until it has been zero for long
 	// enough, so a display that comes up with the cranks already turning
@@ -2334,14 +2316,37 @@ static void test_thread_loop(void) {
 	check(app_pas_get_current_target_rel() > 0.0,
 			"but the value is still published");
 
-	// is_running is set by the thread on entry, and this is the only place it
-	// is ever true in a host test.
+	// is_running, which only the thread sets.
 	check(app_pas_is_running(), "the thread sets is_running");
 
-	// Deliberately not stopped. The exit path clears is_running, but reaching
-	// it means letting the loop see stop_now, and the only setter for that
-	// waits for a thread that would have to be this one. That path needs a
-	// scheduler, so it stays uncovered and this test runs last.
+	// The mixing branch of app_pas_apply_to_throttle, which needs is_running
+	// and is what app_adc.c calls on every ADC cycle. Unreachable before the
+	// scheduler existed.
+	pedal(60.0, 12);
+	run_thread(20);
+	float assist = app_pas_get_current_target_rel();
+	check(assist > 0.0, "the thread published an assist value");
+	check_near(app_pas_apply_to_throttle(0.0), assist, 0.0001,
+			"a resting throttle is replaced by the assist");
+	check_near(app_pas_apply_to_throttle(0.9), 0.9, 0.0001,
+			"a larger throttle wins");
+
+	// And the real stop path. app_pas_stop sets the flag and then sleeps until
+	// the thread acknowledges; each of those sleeps runs the thread, which
+	// sees the flag, clears is_running and returns. This is the handshake the
+	// firmware actually performs at shutdown and on an app change.
+	app_pas_stop();
+	check(!app_pas_is_running(), "stopping clears is_running");
+	check(!sched_alive(), "and the thread has returned");
+	check_near(app_pas_get_current_target_rel(), 0.0, 0.0001,
+			"and the published value is cleared, so a later throttle-only "
+			"session cannot inherit it");
+
+	// Stopping unregisters the terminal commands, so a restart does not
+	// register duplicates.
+	check(find_cmd("pas_status") == 0, "and the terminal commands are gone");
+
+	sched_reset();
 	test_appconf.app_to_use = APP_NONE;
 }
 
@@ -2612,9 +2617,105 @@ static void test_terminal_commands(void) {
 	call_cmd("pas_preset", 1, 0);
 	check(out_has("Usage"), "pas_preset with no argument prints its usage");
 
+	// pas_status under a fully configured setup, which is what reaches the
+	// advisory branches. Half the command is conditional diagnostics, and they
+	// are the whole reason to run it on a bench: they are what tells a rider
+	// which of a dozen settings is the one stopping assist.
+	pas_config f = base_config();
+	f.ctrl_type = PAS_CTRL_TYPE_POWER;
+	f.power_ctrl_mode = PAS_POWER_CLOSED_LOOP;
+	f.torque_source = PAS_TORQUE_SRC_ADC;
+	f.torque_adc_ch = PAS_TORQUE_ADC_EXT3;
+	f.torque_zero_v = 1.5;
+	f.torque_nm_per_v = 70.0;
+	f.torque_max_nm = 140.0;
+	f.torque_avg_pulses = 8;
+	f.assist_gain = 2.0;
+	f.power_max_w = 250.0;
+	f.taper_start_kmh = 20.0;
+	f.taper_end_kmh = 25.0;
+	f.brake_source = PAS_BRAKE_SRC_ADC;
+	f.brake_adc_ch = PAS_TORQUE_ADC_EXT3;
+	f.brake_threshold_v = 2.5;
+	setup(&f);
+	app_pas_start(true);
+	set_adc_volts(ADC_IND_EXT3, 1.8);
+	pedal(60.0, 16);
+	pas_compute_output(2.0);
+	call_cmd("pas_status", 1, 0);
+	check(out_has("Torque ADC ch"), "reports the torque channel");
+	check(out_has("Torque voltage"), "and its voltage");
+	check(out_has("ADC reference"), "and the ADC reference it is measured against");
+	check(out_has("Power control"), "reports the power control mode");
+	check(out_has("Measured power"), "and the measured power it trims against");
+	check(out_has("Torque averaging"), "reports the averaging window");
+	check(out_has("Speed limit"), "reports the speed limit");
+	check(out_has("Power cap"), "and the power cap");
+	check(out_has("Brake"), "and the brake input");
+
+	// The advisory for a stop period long enough that assist lingers. This is
+	// the one that matters most on a first setup: the stock default is long
+	// enough to keep driving for over a second after the cranks stop.
+	pas_config sp = base_config();
+	sp.stop_timeout_s = 1.25;
+	setup(&sp);
+	app_pas_start(true);
+	call_cmd("pas_status", 1, 0);
+	check(out_has("stop period is long"),
+			"a long stop period is called out");
+	check(out_has("0.15 to 0.30"), "with the figure Grin suggest");
+
+	// A torque control type with no torque source, which produces no assist at
+	// all and would otherwise look like a wiring fault.
+	pas_config ns = base_config();
+	ns.ctrl_type = PAS_CTRL_TYPE_TORQUE;
+	ns.torque_source = PAS_TORQUE_SRC_NONE;
+	setup(&ns);
+	app_pas_start(true);
+	call_cmd("pas_status", 1, 0);
+	check(out_has("no torque source"),
+			"a torque control type with no source is called out");
+
+	// A hardware torque source on a board that has none.
+	pas_config hw = base_config();
+	hw.ctrl_type = PAS_CTRL_TYPE_TORQUE;
+	hw.torque_source = PAS_TORQUE_SRC_HW;
+	setup(&hw);
+	app_pas_start(true);
+	pedal(60.0, 12);
+	pas_compute_output(2.0);
+	call_cmd("pas_status", 1, 0);
+#ifndef TEST_TORQUE_SENSOR
+	// Two printf calls, so the sentence spans a newline in the buffer -- a
+	// substring across it never matches.
+	check(out_has("board does not"),
+			"asking for a hardware torque source it lacks is called out");
+	check(out_has("Use the ADC source"), "with the fix for it");
+#endif
+
+	// A saturated torque reading, which reads as maximum effort and is the
+	// failure a sensor above the ADC reference actually produces.
+	pas_config sat = base_config();
+	sat.ctrl_type = PAS_CTRL_TYPE_TORQUE;
+	sat.torque_source = PAS_TORQUE_SRC_ADC;
+	sat.torque_adc_ch = PAS_TORQUE_ADC_EXT3;
+	sat.torque_zero_v = 1.5;
+	sat.torque_nm_per_v = 70.0;
+	sat.torque_max_nm = 140.0;
+	setup(&sat);
+	app_pas_start(true);
+	set_adc_volts(ADC_IND_EXT3, 3.3);
+	pedal(60.0, 12);
+	pas_compute_output(2.0);
+	call_cmd("pas_status", 1, 0);
+	check(out_has("SATURATED"), "a saturated torque reading is called out");
+	check(out_has("divider"), "with the fix for it");
+	set_adc_volts(ADC_IND_EXT3, 0.0);
+
 	// Stopping unregisters them, or a second start would register duplicates.
 	app_pas_stop();
-    check(find_cmd("pas_status") == 0, "stopping unregisters pas_status");
+	check(find_cmd("pas_status") == 0, "stopping unregisters pas_status");
+	sched_reset();
 
 	test_appconf.app_to_use = APP_NONE;
 }

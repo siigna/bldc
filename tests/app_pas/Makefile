@@ -6,7 +6,7 @@ CFLAGS = -O2 -g -Wall -Wextra -Wundef -Wno-unused-function -std=gnu99 -DNO_STM32
 LIBS = -lm
 
 FIRMWARE = ../../applications/app_pas.c ../../util/utils_math.c
-SOURCES = main.c fixture.c $(FIRMWARE)
+SOURCES = main.c fixture.c sched.c $(FIRMWARE)
 
 # Board configurations to cover. The empty one is dedicated pedal sensor pins
 # with no torque sensor.
@@ -77,7 +77,7 @@ FUZZ_CC ?= clang
 fuzz:
 	$(FUZZ_CC) $(filter-out -O2,$(CFLAGS)) -O1 -g \
 		-fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
-		fuzz.c fixture.c $(FIRMWARE) $(LIBS) -o fuzz
+		fuzz.c fixture.c sched.c $(FIRMWARE) $(LIBS) -o fuzz
 
 # A short default run, so this is usable as a check rather than only as a
 # campaign. Override the time for a longer one.

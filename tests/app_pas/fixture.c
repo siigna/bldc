@@ -23,14 +23,6 @@ float test_speed = 0.0;
 float test_current_in = 0.0;
 mc_configuration test_mcconf;
 
-// Set by the chThdCreateStatic stub, so a test can run the app's own thread
-// rather than only the functions it calls.
-void (*test_thread_fn)(void *) = 0;
-
-// Called from the chThdSleep stub. A test that wants the thread to stop counts
-// sleeps here and calls app_pas_stop.
-void (*test_on_sleep)(void) = 0;
-
 // Terminal commands are recorded, not registered, so the tests can call them.
 // There are three and the array is checked against that, rather than sized
 // generously: a fourth should fail here and be noticed.

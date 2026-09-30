@@ -108,14 +108,35 @@ in the stubs rather than through changes to the firmware:
   can invoke a command with its own `argv` and read what it printed back out of
   the buffer `commands_printf` fills.
 
-Leaving the thread loop is the awkward part, and worth knowing about. It exits
-when `stop_now` is set, and the only thing that sets it is `app_pas_stop` --
-which then spins until the thread clears `is_running`. Called from inside the
-thread that is a deadlock. So the sleep hook `longjmp`s out after a set number
-of iterations, which leaves `is_running` true, exactly as it is on real
-hardware while the thread runs. Nothing may call `app_pas_stop` afterwards,
-which is why the thread test runs last. The real exit path needs a scheduler
-and stays uncovered.
+The thread runs on a **cooperative scheduler**, `sched.c`, which is what makes
+its stop path reachable as well as its loop.
+
+Real OS threads would model it faithfully and would also be wrong. The
+firmware's shared state is `volatile`, not atomic, which is sound on a
+single-core MCU that switches at known points and is a data race on a host with
+pre-emption -- a test built on that would be racy and occasionally wrong. So the
+thread is a coroutine on `ucontext`: exactly one side runs at a time, switches
+happen only where the firmware sleeps, and the test drives it. `run_thread(n)`
+is n switches, which is n iterations of the firmware's loop with the test in
+control between each.
+
+That makes the **real shutdown handshake** testable, which a `longjmp` out of
+the loop could not. `app_pas_stop` sets the flag and then sleeps until the
+thread acknowledges; each of those sleeps switches into the thread, which sees
+the flag, clears `is_running` and returns. That is what the firmware does at
+shutdown and on an app change, and it is now covered -- along with
+`app_pas_apply_to_throttle`'s mixing branch, which needs `is_running` and is
+what `app_adc.c` calls on every ADC cycle.
+
+One wart: AddressSanitizer prints `ASan doesn't fully support
+makecontext/swapcontext functions and may produce false positives`. It is a
+warning, not a finding, and the sanitizer run is otherwise clean across all
+four board variants. ASan has a fiber annotation API meant to remove it; an
+attempt at it produced `finishing a fiber switch that has not started`, because
+the pairing across both the trampoline's first entry and an ordinary two-way
+switch is subtler than it looks. Rather than ship a guess at a sanitizer's
+internal contract, the warning stands and `check.sh` gates on `ERROR` and on
+runtime errors instead.
 
 What the thread tests are actually for is the interlocks, which is the part of
 the file that decides whether the motor gets current: safe start, the fault
@@ -124,11 +145,25 @@ motor at all** rather than writing zero, which is the stronger guarantee and
 what the tests assert -- a sentinel value left untouched, plus a published zero
 for the throttle app to read.
 
-Still uncovered, and why: about half of `pas_status`, which is advisory text
-behind conditions a bench session would have to construct one at a time; the
-`is_running` branch of `app_pas_apply_to_throttle`, for the reason above; and
-the handful of `pas_compute_output` branches that need a second motor or a
-board this build is not.
+Most of `pas_status` is covered too, which took a fully configured setup --
+torque on an ADC channel, closed-loop power, averaging, a taper, a power cap
+and a brake input -- plus one call each for the advisories that matter on a
+first setup: a stop period long enough that assist lingers, a torque control
+type with no source, a hardware source the board lacks, and a saturated
+reading. Half that command is conditional diagnostics and they are the whole
+reason to run it on a bench: they are what tells a rider which of a dozen
+settings is the one stopping assist.
+
+Still uncovered, at 92 per cent of lines and 94 of branches: the remaining
+`pas_status` advisories for configurations no variant here builds, three flag
+bits that need the no-pins or shared-pins build rather than the default one,
+and a handful of `pas_compute_output` and thread branches that need a second
+motor or an output-disabled controller.
+
+A note on running clang-tidy: it needs `clang-tools` **without** `clang` in the
+same shell, or the include paths shadow each other and it cannot find
+`stdio.h`. `check.sh` detects that and says so rather than failing the branch
+over a toolchain that is missing its own headers.
 
 ### The fuzzer
 
