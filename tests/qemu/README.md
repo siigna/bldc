@@ -23,6 +23,45 @@ Sizing the engine thread's working area is otherwise a bench job, and `.ram4`
 has very little slack. The figure is exact: a 400-byte local in the thread
 moves it by exactly 400.
 
+## What it found: three bugs in the firmware adapter
+
+`test_luaif` runs `script/luaif.c` -- the engine thread, the lifecycle and the
+event path -- against the real kernel, with only the flash and the terminal
+stubbed. Writing it turned up three defects that no amount of reading had:
+
+**A zero yield parks the thread forever.** `on_tick` called
+`chThdSleepMilliseconds(0)`. Zero is `TIME_IMMEDIATE`, not a valid sleep, and
+with `CH_DBG_ENABLE_ASSERTS` off -- how the firmware is built -- it does not
+complain, it simply never wakes. Any script short enough to finish inside one
+`hook_count` never reaches the hook, so only `while true do end` showed it.
+Now `chThdYield()`.
+
+**One flag cannot carry the stop handshake.** The thread cleared the restart
+request *before* doing the work, so `luaif_restart` stopped waiting and read
+the state of a torn-down engine, reporting failure for a script that was about
+to run fine. Clearing it afterwards instead would have `should_stop()` abort
+the very script it was asked to start. It needs three counters: a request, an
+ack for "the old engine is gone" (which is what `should_stop` keys off), and
+an ack for "the request is served" (which is what callers wait for).
+
+**A restart timeout can kill a working script.** `request()` is bounded so a
+wedged engine cannot take the comms thread with it. But a main chunk that
+legitimately runs past the deadline gets force-closed -- the first long script
+added here printed its result *and* reported failure.
+
+## A coverage gap that passing tests hid
+
+Mutation testing is the only reason the handshake is tested at all. With
+`m_ack_tear` never set, `should_stop()` is permanently true, which kills every
+script after the first restart -- and all twenty checks still passed, because
+no test script ran long enough to reach the instruction hook. A script that
+crosses `hook_count` and must *not* be interrupted was the missing case.
+
+One mutation still survives knowingly: removing `on_tick`'s yield changes
+nothing here, because the engine runs below `NORMALPRIO` and everything that
+matters preempts it regardless. The yield buys fairness against threads at its
+own priority, and the test has none.
+
 ## What it found: Lua's C-call limit is unusable at its default
 
 `test_engine` runs the real engine -- the vendored Lua core, the container
@@ -57,6 +96,7 @@ free way to get one. `llimits.h` guards the default with `#if !defined`, so a
 
 On a vehicle this is the difference between a script erroring and a motor
 controller resetting mid-ride.
+
 
 ## What it does *not* simulate
 

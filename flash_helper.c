@@ -34,6 +34,9 @@
 #ifdef USE_LISPBM
 #include "lispif.h"
 #endif
+#ifdef USE_LUA
+#include "luaif.h"
+#endif
 
 /*
  * Defines
@@ -133,6 +136,9 @@ uint16_t flash_helper_erase_new_app(uint32_t new_app_size) {
 #ifdef USE_LISPBM
 	lispif_stop();
 #endif
+#ifdef USE_LUA
+	luaif_stop();
+#endif
 
 	FLASH_Unlock();
 	FLASH_ClearFlag(FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | FLASH_FLAG_PGAERR |
@@ -185,6 +191,16 @@ uint16_t flash_helper_erase_code(int ind) {
 #ifdef USE_LISPBM
 	if (ind == CODE_IND_LISP || ind == CODE_IND_LISP_CONST) {
 		lispif_stop();
+	}
+#endif
+#ifdef USE_LUA
+	/*
+	 * The engine reads its source straight out of these pages, so it has to
+	 * have let go before the erase starts, not merely been asked to.
+	 * luaif_stop blocks until it has.
+	 */
+	if (ind == CODE_IND_LISP || ind == CODE_IND_LISP_CONST) {
+		luaif_stop();
 	}
 #endif
 

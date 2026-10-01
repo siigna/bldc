@@ -1,0 +1,543 @@
+/*
+	Copyright 2025 Benjamin Vedder	benjamin@vedder.se
+
+	This file is part of the VESC firmware.
+
+	The VESC firmware is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	The VESC firmware is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "luaif.h"
+#include "script_lua.h"
+#include "script_alloc.h"
+#include "script_queue.h"
+#include "script_pack.h"
+
+#include <string.h>
+
+#include "ch.h"
+
+/*
+ * The seam is narrow on purpose: the kernel is always the real one, because
+ * the threading and locking are exactly what wants testing. Only the two
+ * things that need a board are swapped out -- the flash the script is read
+ * from, and the terminal its output goes to.
+ */
+#ifdef LUAIF_HOST_TEST
+#include "luaif_host.h"
+#else
+#include "commands.h"
+#include "flash_helper.h"
+#endif
+
+/*
+ * Memory, and where it goes. Measured on 75_100_V2 with USE_LISPBM=0
+ * USE_LUA=0, which is the space this engine has to fit into:
+ *
+ *   ram0   76,040 of 131,072 used   55,032 free
+ *   ram4   33,296 of  63,488 used   30,192 free
+ *
+ * So the engine thread's stack goes in ram4 (CCM) and the arena goes in main
+ * RAM, which is the opposite of what one might guess. CCM has the less room
+ * of the two, and a stack is what it suits: no DMA engine needs to reach a
+ * stack, and CCM cannot be a DMA target. Putting the arena there as well
+ * overflowed ram4 by 7,088 bytes.
+ *
+ * ram4 is not "LispBM's heap and nothing else" -- 33 KB of application thread
+ * working areas live there in every build. Dropping LispBM frees room in
+ * ram4, but not all of it.
+ *
+ * The result still costs less RAM than the LispBM build it replaces:
+ * ram0 reaches 100,616 against LispBM's 110,288, and ram4 45,584 against
+ * 63,208.
+ *
+ * The two sizes are coupled and must not be changed independently:
+ *
+ *   LUA_ARENA_SIZE   what a script may allocate, the ceiling it hits first
+ *   LUA_WA_SIZE      the engine thread's stack, which bounds LUAI_MAXCCALLS
+ *
+ * script.mk sets LUAI_MAXCCALLS from LUA_WA_SIZE by the measured cost of a
+ * nested call. Shrinking the working area without lowering that limit trades
+ * a catchable Lua error for a HardFault; the arithmetic is in script.mk and
+ * the measurement is in tests/qemu.
+ */
+#define LUA_ARENA_SIZE		(24 * 1024)
+#define LUA_WA_SIZE			12288
+
+/*
+ * Ceiling below the arena, so a runaway script fails its own allocation with
+ * a Lua error the script can see, rather than by exhausting the arena and
+ * failing whatever allocates next.
+ */
+#define LUA_MEM_LIMIT		(20 * 1024)
+
+// Instructions between hook runs. Low enough to stop a tight loop promptly,
+// high enough that the hook is not most of the run time.
+#define LUA_HOOK_COUNT		2000
+
+// Main RAM, not .ram4: see the budget above.
+static uint8_t m_arena[LUA_ARENA_SIZE] __attribute__((aligned(8)));
+static THD_WORKING_AREA(m_wa, LUA_WA_SIZE) __attribute__((section(".ram4")));
+
+static mutex_t m_mtx;
+static script_queue_t m_queue;
+static script_lua_t *m_engine;
+static script_blob_t m_blob;
+static bool m_blob_valid;
+
+static volatile bool m_running;
+static volatile bool m_last_run_ok;
+static volatile bool m_load_code;
+static volatile bool m_print_restart;
+static volatile int m_restart_cnt;
+
+/*
+ * Request handshake between callers and the engine thread.
+ *
+ * Three counters rather than a flag, because one flag cannot mean both "a
+ * caller wants the running script stopped" and "the caller may now look at
+ * the result" -- the first has to be true while the old script unwinds and
+ * false before the new one starts, and the second only becomes true after
+ * that. A single flag has to be cleared either too early, so the caller reads
+ * a torn-down engine and reports failure, or too late, so should_stop aborts
+ * the script it was asked to start. Both of those were written here first.
+ *
+ *   m_req_seq    bumped by a caller to ask for a stop or a restart
+ *   m_ack_tear   bumped once the old engine is gone; should_stop keys off the
+ *                gap between this and m_req_seq, so it goes false before the
+ *                replacement script runs
+ *   m_ack_done   bumped when the request is fully served, which is what a
+ *                caller waits for
+ */
+static volatile uint32_t m_req_seq;
+static volatile uint32_t m_ack_tear;
+static volatile uint32_t m_ack_done;
+
+static thread_t *m_thd;
+static volatile bool m_thd_started;
+
+/* Set while the engine thread is inside the interpreter, so luaif_stop knows
+ * whether it has to wait for an unwind or can just tear down. */
+static volatile bool m_in_script;
+
+static uint32_t m_timer_last_ms;
+
+/* ------------------------------------------------------------------ output -- */
+
+static void engine_print(const char *msg) {
+	commands_printf_lisp("%s", msg);
+}
+
+char *luaif_print_prefix(void) {
+	/*
+	 * A format string, not a label: commands.c consumes it as
+	 * sprintf(buf, prefix, "%s"). LispBM's is a user-settable buffer; until
+	 * there is a way for a Lua script to set one, this returns what the
+	 * no-engine fallback already returns, so script output is formatted
+	 * identically and this change is not also a protocol change.
+	 */
+	return "%s";
+}
+
+/* ------------------------------------------------------------ the script -- */
+
+/*
+ * Where the script comes from. flash_helper hands back a pointer straight
+ * into memory-mapped flash, so there is no copy and no RAM cost for the
+ * source -- but it also means the pointer dies when those pages are erased,
+ * which is why luaif_stop is synchronous.
+ *
+ * Behind a seam so the simulated target can hand over a blob without a flash
+ * driver. See tests/qemu.
+ */
+static const uint8_t *code_ptr(int32_t *len_out) {
+#ifdef LUAIF_HOST_TEST
+	return luaif_host_code(len_out);
+#else
+	*len_out = (int32_t)flash_helper_code_size(CODE_IND_LISP);
+	return (const uint8_t *)flash_helper_code_data(CODE_IND_LISP);
+#endif
+}
+
+static bool should_stop(void) {
+	// True only between a request arriving and the old engine being released.
+	return m_req_seq != m_ack_tear;
+}
+
+static void on_tick(void) {
+	/*
+	 * Hand the CPU back. Without this a script holds its priority level for
+	 * as long as it runs, and a script is not obliged to ever return.
+	 *
+	 * chThdYield, not chThdSleepMilliseconds(0): a zero sleep is
+	 * TIME_IMMEDIATE, which is not a valid sleep interval. With
+	 * CH_DBG_ENABLE_ASSERTS off -- which is how the firmware is built -- it
+	 * does not complain, it just never wakes, and the engine thread parks
+	 * forever inside the hook. A script that returns promptly never reaches
+	 * the hook at all, so this only ever showed up under `while true do end`.
+	 *
+	 * Note this yield is not covered by tests/qemu and cannot easily be: the
+	 * engine runs below NORMALPRIO, so everything that matters preempts it
+	 * whether or not it yields. What the yield buys is fairness against
+	 * threads at its own priority, and there are none in the test.
+	 */
+	chThdYield();
+}
+
+static void engine_close(void) {
+	if (m_engine != NULL) {
+		script_lua_close(m_engine);
+		m_engine = NULL;
+	}
+	m_blob_valid = false;
+	m_running = false;
+}
+
+/*
+ * Build an interpreter and run the script's main chunk.
+ *
+ * Returns false for "nothing to run" as well as for a real failure, and says
+ * which in the message, because an empty code slot is the normal state of a
+ * board nobody has uploaded to yet.
+ */
+static bool engine_open_and_run(bool print) {
+	int32_t len = 0;
+	const uint8_t *blob = code_ptr(&len);
+
+	engine_close();
+
+	if (blob == NULL || len <= 0) {
+		if (print) {
+			commands_printf_lisp("No script in flash");
+		}
+		return false;
+	}
+
+	if (!script_pack_parse(blob, len, &m_blob)) {
+		if (print) {
+			commands_printf_lisp("Script container is not valid");
+		}
+		return false;
+	}
+	m_blob_valid = true;
+
+	// Reset the arena before the interpreter, not after: init abandons
+	// whatever was allocated, which is only correct once the owner is gone.
+	script_alloc_init(m_arena, sizeof(m_arena), LUA_MEM_LIMIT);
+
+	script_lua_cfg_t cfg = {0};
+	cfg.mem_limit = LUA_MEM_LIMIT;
+	cfg.print = engine_print;
+	cfg.should_stop = should_stop;
+	cfg.on_tick = on_tick;
+	cfg.hook_count = LUA_HOOK_COUNT;
+	cfg.blob = &m_blob;
+	cfg.alloc = script_alloc;
+	cfg.alloc_ud = NULL;
+
+	m_engine = script_lua_open(&cfg);
+	if (m_engine == NULL) {
+		if (print) {
+			commands_printf_lisp("Not enough memory for the interpreter");
+		}
+		m_blob_valid = false;
+		return false;
+	}
+
+	script_lua_install_events(m_engine);
+
+	char err[128];
+	m_in_script = true;
+	bool ok = script_lua_run(m_engine, m_blob.src, m_blob.src_len,
+			"main", err, sizeof(err));
+	m_in_script = false;
+
+	if (!ok) {
+		// The interpreter is kept. A main chunk that raised may still have
+		// registered handlers before it did, and tearing the state down would
+		// also throw away the traceback the author needs.
+		if (print) {
+			commands_printf_lisp("Script error: %s", err);
+		}
+		m_running = true;
+		return false;
+	}
+
+	m_running = true;
+	if (print) {
+		commands_printf_lisp("Script started, %d bytes", (int)len);
+	}
+	return true;
+}
+
+/* ------------------------------------------------------------- dispatch --- */
+
+static void dispatch_pending(void) {
+	script_event_t ev;
+
+	while (script_queue_fetch(&m_queue, &ev)) {
+		if (m_engine == NULL) {
+			continue;
+		}
+
+		char err[128];
+		m_in_script = true;
+		bool ok = script_lua_dispatch(m_engine, &ev, err, sizeof(err));
+		m_in_script = false;
+
+		if (!ok) {
+			/*
+			 * Reported and kept. A handler that raises on one frame should not
+			 * silently unsubscribe a vehicle from its own CAN traffic, which
+			 * is what removing it would do.
+			 */
+			commands_printf_lisp("Event handler error: %s", err);
+		}
+
+		if (should_stop()) {
+			break;
+		}
+	}
+}
+
+static void run_timer(void) {
+	if (m_engine == NULL) {
+		return;
+	}
+
+	uint32_t period = script_lua_timer_period(m_engine);
+	if (period == 0) {
+		return;
+	}
+
+	uint32_t now = (uint32_t)(ST2MS(chVTGetSystemTimeX()));
+	if ((now - m_timer_last_ms) < period) {
+		return;
+	}
+	m_timer_last_ms = now;
+
+	script_event_t ev = {0};
+	ev.type = SCRIPT_EV_TIMER;
+
+	char err[128];
+	m_in_script = true;
+	bool ok = script_lua_dispatch(m_engine, &ev, err, sizeof(err));
+	m_in_script = false;
+
+	if (!ok) {
+		commands_printf_lisp("Timer handler error: %s", err);
+	}
+}
+
+/* --------------------------------------------------------------- thread --- */
+
+static THD_FUNCTION(lua_thread, arg) {
+	(void)arg;
+	chRegSetThreadName("lua");
+
+	m_thd_started = true;
+
+	// Load once at boot, quietly: a board with no script should say nothing.
+	chMtxLock(&m_mtx);
+	m_last_run_ok = engine_open_and_run(false);
+	m_restart_cnt++;
+	chMtxUnlock(&m_mtx);
+
+	for (;;) {
+		uint32_t seq = m_req_seq;
+
+		if (seq != m_ack_done) {
+			bool print = m_print_restart;
+			bool load = m_load_code;
+
+			chMtxLock(&m_mtx);
+			engine_close();
+			chMtxUnlock(&m_mtx);
+
+			/*
+			 * The old engine is gone, so should_stop goes false here -- before
+			 * the replacement runs, and not before the old one has unwound.
+			 */
+			m_ack_tear = seq;
+
+			if (load) {
+				chMtxLock(&m_mtx);
+				m_last_run_ok = engine_open_and_run(print);
+				chMtxUnlock(&m_mtx);
+			} else {
+				m_last_run_ok = false;
+			}
+
+			m_restart_cnt++;
+			m_ack_done = seq;
+		}
+
+		if (m_engine != NULL) {
+			chMtxLock(&m_mtx);
+			dispatch_pending();
+			run_timer();
+			chMtxUnlock(&m_mtx);
+		}
+
+		/*
+		 * 1 ms, which is the resolution a script's timer can ask for and far
+		 * longer than a dispatch pass takes. Polling rather than waiting on
+		 * the queue keeps the producers free of any blocking call -- the CAN
+		 * path must never wait on a script.
+		 */
+		chThdSleepMilliseconds(1);
+	}
+}
+
+/* ----------------------------------------------------------- entry points -- */
+
+void luaif_init(void) {
+	if (m_thd != NULL) {
+		return;
+	}
+
+	chMtxObjectInit(&m_mtx);
+	script_queue_init(&m_queue);
+
+	/*
+	 * NORMALPRIO - 1, which is where LispBM's evaluator thread runs and for
+	 * the same reason: a script must not be able to outrank the comms and
+	 * control threads it shares the CPU with.
+	 */
+	m_thd = chThdCreateStatic(m_wa, sizeof(m_wa), NORMALPRIO - 1,
+			lua_thread, NULL);
+}
+
+/*
+ * Ask the engine thread for something and wait until it has done it.
+ *
+ * Bounded, because the caller is usually the comms thread: blocking it
+ * forever on an engine that has somehow wedged would be worse than the stale
+ * flash pointer the wait exists to prevent. On timeout the engine is dropped
+ * here instead, under the lock, so no pointer into flash outlives the call.
+ *
+ * The timeout is a real tradeoff, not just a safety net. A script whose main
+ * chunk legitimately takes longer than the deadline gets force-closed even
+ * though it is working -- which is exactly what happened the first time a
+ * long-running script was added to tests/qemu: the script printed its result
+ * and the restart still reported failure. A script doing heavy work at
+ * startup should move it into a handler rather than the main chunk.
+ */
+static bool request(bool load_code, bool print, int timeout_ms) {
+	uint32_t seq;
+
+	m_print_restart = print;
+	m_load_code = load_code;
+
+	chSysLock();
+	seq = ++m_req_seq;
+	chSysUnlock();
+
+	for (int i = 0; (i < timeout_ms) && (m_ack_done != seq); i++) {
+		chThdSleepMilliseconds(1);
+	}
+
+	if (m_ack_done != seq) {
+		chMtxLock(&m_mtx);
+		engine_close();
+		chMtxUnlock(&m_mtx);
+		m_ack_tear = seq;
+		m_ack_done = seq;
+		return false;
+	}
+
+	return m_last_run_ok;
+}
+
+void luaif_stop(void) {
+	if (m_thd == NULL) {
+		return;
+	}
+
+	(void)request(false, false, 1000);
+}
+
+bool luaif_restart(bool print, bool load_code) {
+	if (m_thd == NULL) {
+		return false;
+	}
+
+	return request(load_code, print, 2000);
+}
+
+int luaif_get_restart_cnt(void) {
+	return m_restart_cnt;
+}
+
+void luaif_process_can(uint32_t can_id, uint8_t *data8, int len, bool is_ext) {
+	if ((m_engine == NULL) || !m_running || (data8 == NULL) || (len < 0)) {
+		return;
+	}
+
+	int type = is_ext ? SCRIPT_EV_CAN_EID : SCRIPT_EV_CAN_SID;
+
+	/*
+	 * Asked before copying. Most scripts register no CAN handler at all, and
+	 * on a busy bus this runs for every frame -- queueing work nothing will
+	 * consume would cost a memcpy per frame and push out events that do have
+	 * a handler.
+	 */
+	if (!script_lua_wants(m_engine, type)) {
+		return;
+	}
+
+	script_event_t ev = {0};
+	ev.type = (uint8_t)type;
+	ev.id = can_id;
+
+	if (len > SCRIPT_EVENT_PAYLOAD) {
+		ev.len = SCRIPT_EVENT_PAYLOAD;
+		ev.truncated = 1;
+	} else {
+		ev.len = (uint16_t)len;
+	}
+	memcpy(ev.data, data8, ev.len);
+
+	script_queue_post(&m_queue, &ev);
+}
+
+void luaif_process_custom_app_data(unsigned char *data, unsigned int len) {
+	if ((m_engine == NULL) || !m_running || (data == NULL)) {
+		return;
+	}
+
+	if (!script_lua_wants(m_engine, SCRIPT_EV_APP_DATA)) {
+		return;
+	}
+
+	script_event_t ev = {0};
+	ev.type = SCRIPT_EV_APP_DATA;
+
+	if (len > SCRIPT_EVENT_PAYLOAD) {
+		ev.len = SCRIPT_EVENT_PAYLOAD;
+		ev.truncated = 1;
+	} else {
+		ev.len = (uint16_t)len;
+	}
+	memcpy(ev.data, data, ev.len);
+
+	script_queue_post(&m_queue, &ev);
+}
+
+void luaif_process_shutdown(void) {
+	/*
+	 * Nothing yet, and deliberately nothing rather than a stub that waits.
+	 * This sits in the power-off path, so until there is a shutdown hook for
+	 * a script to register, the right behaviour is to cost nothing at all.
+	 */
+}

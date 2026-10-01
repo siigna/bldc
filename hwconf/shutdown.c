@@ -26,6 +26,9 @@
 #ifdef USE_LISPBM
 #include "lispif.h"
 #endif
+#ifdef USE_LUA
+#include "luaif.h"
+#endif
 
 #ifdef HW_SHUTDOWN_CUSTOM
 
@@ -107,6 +110,9 @@ bool shutdown_sample_button(void) {
 void shutdown_save_and_hold(void) {
 #ifdef USE_LISPBM
 	lispif_process_shutdown();
+#endif
+#ifdef USE_LUA
+	luaif_process_shutdown();
 #endif
 
 	conf_general_store_backup_data();

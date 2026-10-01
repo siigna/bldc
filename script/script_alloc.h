@@ -24,15 +24,18 @@
  * build on a buffer you hand it, and no realloc -- so that is what this
  * supplies, using the old size Lua passes in to know how much to copy.
  *
- * The arena is in CCM rather than main RAM, which is where the interpreter
- * heap has to live on an F405: with the script engine out, main RAM is
- * already 107 KB of the 128 KB it has, while CCM is 62 KB holding nothing
- * but LispBM's own heap -- and that is gone in a build that wants this one.
- * CCM is not DMA-capable, which costs an interpreter heap nothing.
+ * The caller supplies the arena, so this file does not choose where it
+ * lives; luaif.c does, and it records the measured budget. (An earlier
+ * version of this comment asserted the arena had to be in CCM because main
+ * RAM was down to 21 KB. That was wrong: 107 KB of 128 is what the *LispBM*
+ * build uses, and with the script engine out main RAM has 55 KB free against
+ * CCM's 30 KB. The arena is in main RAM and the engine thread's stack is in
+ * CCM, which is the way round that fits.)
  *
- * Not newlib's malloc. That lands in the main RAM heap behind _sbrk, where
- * there are about 21 KB and no say in the matter, and it would put the
- * interpreter in contention with everything else that allocates.
+ * Not newlib's malloc, wherever the arena sits. A fixed arena is what makes
+ * the ceiling meaningful and keeps the interpreter out of contention with
+ * everything else that allocates -- and it is why a runaway script fails its
+ * own allocation instead of someone else's.
  *
  * A ceiling is enforced on top of the arena size. The arena is the hard
  * limit; the ceiling is the one a script hits first, so a runaway fails with

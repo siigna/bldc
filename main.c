@@ -71,6 +71,9 @@
 #ifdef USE_LISPBM
 #include "lispif.h"
 #endif
+#ifdef USE_LUA
+#include "luaif.h"
+#endif
 
 /*
  * HW resources used:

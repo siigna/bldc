@@ -46,6 +46,9 @@
 #ifdef USE_LISPBM
 #include "lispif.h"
 #endif
+#ifdef USE_LUA
+#include "luaif.h"
+#endif
 
 // Settings
 #define RX_FRAMES_SIZE	50
@@ -1347,6 +1350,9 @@ static void process_frame_vesc(CANRxFrame rxmsg) {
 #ifdef USE_LISPBM
 				lispif_process_can(rxmsg.EID, rxmsg.data8, rxmsg.DLC, true);
 #endif
+#ifdef USE_LUA
+				luaif_process_can(rxmsg.EID, rxmsg.data8, rxmsg.DLC, true);
+#endif
 			}
 		}
 	} else {
@@ -1362,6 +1368,11 @@ static void process_frame_vesc(CANRxFrame rxmsg) {
 #ifdef USE_LISPBM
 		if (!sid_cb_used) {
 			lispif_process_can(rxmsg.SID, rxmsg.data8, rxmsg.DLC, false);
+		}
+#endif
+#ifdef USE_LUA
+		if (!sid_cb_used) {
+			luaif_process_can(rxmsg.SID, rxmsg.data8, rxmsg.DLC, false);
 		}
 #endif
 	}
@@ -1399,6 +1410,10 @@ static THD_FUNCTION(cancom_process_thread, arg) {
 					if (!sid_cb_used) {
 						lispif_process_can(rxmsg.SID, rxmsg.data8, rxmsg.DLC, false);
 					}
+#elif defined(USE_LUA)
+					if (!sid_cb_used) {
+						luaif_process_can(rxmsg.SID, rxmsg.data8, rxmsg.DLC, false);
+					}
 #else
 					(void)sid_cb_used;
 #endif
@@ -1410,6 +1425,10 @@ static THD_FUNCTION(cancom_process_thread, arg) {
 #ifdef USE_LISPBM
 					if (!eid_cb_used) {
 						lispif_process_can(rxmsg.EID, rxmsg.data8, rxmsg.DLC, true);
+					}
+#elif defined(USE_LUA)
+					if (!eid_cb_used) {
+						luaif_process_can(rxmsg.EID, rxmsg.data8, rxmsg.DLC, true);
 					}
 #else
 					(void)eid_cb_used;

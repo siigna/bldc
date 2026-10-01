@@ -53,6 +53,16 @@
 #include "crc.h"
 #ifdef USE_LISPBM
 #include "lispif.h"
+#elif defined(USE_LUA)
+#include "luaif.h"
+/*
+ * Same channel, different engine. commands_printf_lisp is the script output
+ * path whatever language the script is written in, so it borrows the Lua
+ * engine's prefix here rather than growing a second print path.
+ */
+static char *lispif_print_prefix(void) {
+	return luaif_print_prefix();
+}
 #else
 /*
  * The script print prefix, which lispif.h provides when LispBM is compiled
@@ -787,6 +797,9 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 #ifdef USE_LISPBM
 		lispif_process_custom_app_data(data, len);
 #endif
+#ifdef USE_LUA
+		luaif_process_custom_app_data(data, len);
+#endif
 		break;
 
 	case COMM_CUSTOM_HW_DATA:
@@ -1453,6 +1466,12 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 			flash_helper_erase_code(CODE_IND_LISP_CONST);
 		}
 #endif
+#ifdef USE_LUA
+		if (packet_id == COMM_LISP_ERASE_CODE) {
+			luaif_stop();
+			flash_helper_erase_code(CODE_IND_LISP_CONST);
+		}
+#endif
 
 		uint16_t flash_res = flash_helper_erase_code(packet_id == COMM_QMLUI_ERASE ? CODE_IND_QML : CODE_IND_LISP);
 
@@ -1619,6 +1638,15 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 #ifdef USE_LISPBM
 		lispif_process_cmd(data - 1, len + 1, reply_func);
 #endif
+		/*
+		 * No USE_LUA arm here yet. These are the COMM_LISP_* packets -- code
+		 * upload, erase, REPL, stats -- and the Lua engine has no handler for
+		 * them, so a USE_LUA build currently runs whatever is already in
+		 * flash and offers no way to put it there. That protocol handler is
+		 * the next piece; arming this site before it exists would answer
+		 * VESC Tool's uploads with silence, which looks like a hung board
+		 * rather than a missing feature.
+		 */
 		break;
 	}
 
@@ -2082,9 +2110,13 @@ static THD_FUNCTION(blocking_thread, arg) {
 		chThdSleepMilliseconds(10);
 	}
 
-	// Start lisp from here because main does not have enough stack space.
+	// Start the script engine from here because main does not have enough
+	// stack space to build an interpreter.
 #ifdef USE_LISPBM
 	lispif_init();
+#endif
+#ifdef USE_LUA
+	luaif_init();
 #endif
 
 	for(;;) {

@@ -29,13 +29,27 @@ INCDIR := . $(TOP) $(KERNINC) $(PORTINC) $(STARTUPINC) \
 # test_engine links the real engine: the vendored Lua core, the container
 # parser, and the CCM arena allocator. syscalls.c is what make/fw.mk gives the
 # firmware for newlib's _sbrk, so malloc behaves here as it does on the board.
+ENGINE_SRC = $(wildcard $(TOP)/script/lua/*.c) \
+             $(TOP)/script/script_pack.c \
+             $(TOP)/script/script_lua.c \
+             $(TOP)/script/script_alloc.c \
+             $(CHIBIOS)/os/various/syscalls.c
+
 ifeq ($(TEST),test_engine)
-  CSRC += $(wildcard $(TOP)/script/lua/*.c) \
-          $(TOP)/script/script_pack.c \
-          $(TOP)/script/script_lua.c \
-          $(TOP)/script/script_alloc.c \
-          $(CHIBIOS)/os/various/syscalls.c
+  CSRC += $(ENGINE_SRC)
   INCDIR += $(TOP)/script $(TOP)/script/lua
+endif
+
+# test_luaif adds the firmware adapter and the queue it drains. LUAIF_HOST_TEST
+# swaps only flash_helper and the terminal for the stubs in luaif_host.h; the
+# kernel, the engine, the arena and the queue are all the real thing.
+ifeq ($(TEST),test_luaif)
+  CSRC += $(ENGINE_SRC) \
+          $(TOP)/script/script_queue.c \
+          $(TOP)/script/luaif.c \
+          $(TOP)/util/crc.c
+  INCDIR += $(TOP)/script $(TOP)/script/lua $(TOP)/util
+  TESTDEFS += -DLUAIF_HOST_TEST
 endif
 
 
@@ -50,7 +64,7 @@ DEFS   = -DCORTEX_USE_FPU=TRUE -DSTM32F405xx \
 CFLAGS = $(ARCH) $(DEFS) -O2 -g -std=gnu99 -ffreestanding \
          -fomit-frame-pointer -falign-functions=16 \
          -ffunction-sections -fdata-sections -fsingle-precision-constant \
-         -Wall -Wextra $(CFLAGS_EXTRA) $(patsubst %,-I%,$(INCDIR))
+         -Wall -Wextra $(TESTDEFS) $(CFLAGS_EXTRA) $(patsubst %,-I%,$(INCDIR))
 
 # ChibiOS's .s files are macro-heavy and lowercase .s is not preprocessed
 # unless asked, so assembly needs its own rule rather than riding on CFLAGS.
