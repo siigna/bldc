@@ -17,7 +17,7 @@
 
 cd "$(dirname "$0")"
 
-TESTS="test_kernel test_engine test_luaif test_bindings"
+TESTS="test_kernel test_engine test_luaif test_bindings test_conf"
 # The engine must be built with the limit the firmware uses, or the deep-
 # recursion checks would be testing a configuration nothing ships.
 ENGINE_FLAGS="-DLUAI_MAXCCALLS=16"
@@ -31,7 +31,7 @@ for t in $TESTS; do
     # no result at all.
     rm -f "$t.elf"
     xflags=""
-    case "$t" in test_engine|test_luaif|test_bindings) xflags="$ENGINE_FLAGS" ;; esac
+    case "$t" in test_engine|test_luaif|test_bindings|test_conf) xflags="$ENGINE_FLAGS" ;; esac
     if ! make --no-print-directory TEST="$t" CFLAGS_EXTRA="$xflags" >/dev/null 2>&1; then
         printf '%s: FAILED (build error)\n' "$t"
         make --no-print-directory TEST="$t" CFLAGS_EXTRA="$xflags" 2>&1 | tail -20

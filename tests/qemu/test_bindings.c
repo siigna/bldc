@@ -178,7 +178,15 @@ static THD_FUNCTION(engine, arg) {
 	fake_mc.ah_reset = true;
 	fake_mc.wh_reset = true;
 	fake_mc.tacho_reset = true;
-	run("counter read", "vesc.get_ah() vesc.get_wh() vesc.get_tacho()");
+	run("counter read",
+			"vesc.get_ah()\n"
+			"vesc.get_wh()\n"
+			"vesc.get_tacho()\n");
+	qrt_puts("  ah_reset=");
+	qrt_putu(fake_mc.ah_reset ? 1u : 0u);
+	qrt_puts(" sizeof(fake_mc)=");
+	qrt_putu((unsigned)sizeof(fake_mc));
+	qrt_puts("\r\n");
 	qrt_expect_ok("reading amp-hours does not reset them", !fake_mc.ah_reset);
 	qrt_expect_ok("reading watt-hours does not reset them", !fake_mc.wh_reset);
 	qrt_expect_ok("reading the tachometer does not reset it",

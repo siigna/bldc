@@ -58,3 +58,12 @@ void mc_interface_set_brake_current_rel(float v) { fake_mc.set_brake_rel = v; fa
 void mc_interface_set_handbrake(float c) { fake_mc.set_handbrake = c; fake_mc.set_calls++; }
 void mc_interface_set_handbrake_rel(float v) { fake_mc.set_handbrake_rel = v; fake_mc.set_calls++; }
 void mc_interface_release_motor(void) { fake_mc.released++; fake_mc.set_calls++; }
+
+const volatile mc_configuration *mc_interface_get_configuration(void) {
+	return &fake_mc.mcconf;
+}
+
+void mc_interface_set_configuration(mc_configuration *configuration) {
+	fake_mc.mcconf = *configuration;
+	fake_mc.mcconf_applied++;
+}

@@ -23,6 +23,57 @@ Sizing the engine thread's working area is otherwise a bench job, and `.ram4`
 has very little slack. The figure is exact: a 400-byte local in the thread
 moves it by exactly 400.
 
+## The configuration bindings, and a table that cannot drift
+
+`conf_get`/`conf_set` cover 143 parameters. In lisp they are a pair of
+500-line if-else chains, one per direction. Here the mapping is **generated
+from those chains** by `tests/conf_table/gen_conf_table.py`, and
+`tests/conf_table/run.sh` regenerates and diffs it, so a divergence fails a
+test rather than shipping.
+
+Generated rather than retyped because a round-trip test cannot catch the
+failure that matters: set-then-get agrees whether `l_current_max` is wired to
+`l_current_max` or to the field beside it. An independent statement of the
+same mapping is the only thing that catches it, and lisp's chains are one that
+already exists. The generator refuses anything it does not recognise, so a new
+upstream parameter is reported rather than guessed at.
+
+Two properties also had to be derived, not assumed:
+
+- **87 of 143 need a full reconfigure** rather than a write to the live
+  struct. Writing one of those through the fast path leaves it looking set
+  without taking effect.
+- **Four are stored negative** and given as a positive magnitude (`-fabsf` in
+  lisp). `conf_get` returns the stored value either way, matching lisp.
+
+### Byte offsets were the wrong design, and only the target said so
+
+The first version was a table of `offsetof` plus a width classification. It
+HardFaulted with `UFSR.UNALIGNED`, and the reason is worth recording:
+
+- `uint8_t` and `uint16_t` members were classified as int and read four bytes
+  wide — both unaligned and overlapping their neighbours.
+- A float read through a cast compiles to `VLDR`, which has **no unaligned
+  form** on a Cortex-M4, so a misaligned float access faults rather than
+  limping.
+- `arm-none-eabi` defaults to `-fshort-enums`, so an enum's width is not
+  knowable from its declaration at all. That makes the approach unfixable
+  rather than merely buggy.
+
+The generated lists now name the struct member and let the compiler pick the
+load. The cost is a `strcmp` chain — which is what lisp does too — and about
+11 KB of flash over the offset table. Correctness was worth it; `conf_get` is
+on no hot path.
+
+A comment I had written claimed `CONF_INT` was only emitted for int-sized
+members. It was false when I wrote it.
+
+### Measured
+
+Walking all 143 names from Lua peaks at **20,174 bytes** of script memory —
+essentially the firmware's entire 20 KB ceiling. A script that enumerates the
+configuration has no room left for anything else.
+
 ## The motor bindings
 
 `test_bindings` compiles `script/lua_vesc_mc.c` against a fake `mc_interface`

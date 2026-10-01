@@ -23,6 +23,7 @@
 #include "script_queue.h"
 #include "script_pack.h"
 #include "lua_vesc_mc.h"
+#include "lua_vesc_conf.h"
 
 #include <string.h>
 
@@ -283,6 +284,7 @@ static bool engine_open_and_run(bool print) {
 
 	script_lua_install_events(m_engine);
 	script_lua_register(m_engine, lua_vesc_mc_fns());
+	script_lua_register(m_engine, lua_vesc_conf_fns());
 
 	char err[128];
 	m_in_script = true;

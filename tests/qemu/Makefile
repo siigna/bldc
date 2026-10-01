@@ -52,6 +52,17 @@ ifeq ($(TEST),test_bindings)
   INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua
 endif
 
+# test_conf compiles lua_vesc_conf.c against the fakes, including the real
+# datatypes.h so the configuration structs are the firmware's own -- the
+# offsets in the generated table have to mean something.
+ifeq ($(TEST),test_conf)
+  CSRC += $(ENGINE_SRC) \
+          $(TOP)/script/lua_vesc_conf.c \
+          fake/fake_mc.c \
+          fake/fake_conf.c
+  INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua
+endif
+
 # test_luaif adds the firmware adapter and the queue it drains. LUAIF_HOST_TEST
 # swaps only flash_helper and the terminal for the stubs in luaif_host.h; the
 # kernel, the engine, the arena and the queue are all the real thing.
@@ -60,8 +71,10 @@ ifeq ($(TEST),test_luaif)
           $(TOP)/script/script_queue.c \
           $(TOP)/script/luaif.c \
           $(TOP)/script/lua_vesc_mc.c \
+          $(TOP)/script/lua_vesc_conf.c \
           $(TOP)/util/buffer.c \
-          fake/fake_mc.c
+          fake/fake_mc.c \
+          fake/fake_conf.c
   # fake/ first, as above: luaif.c registers the motor bindings, so this test
   # pulls in lua_vesc_mc.c and therefore needs the fake mc_interface too.
   INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua $(TOP)/util
@@ -77,14 +90,19 @@ ARCH   = -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16
 DEFS   = -DCORTEX_USE_FPU=TRUE -DSTM32F405xx \
          -DTHUMB_PRESENT -DTHUMB_NO_INTERWORKING
 
-CFLAGS = $(ARCH) $(DEFS) -O2 -g -std=gnu99 -ffreestanding \
+# -MMD -MP emits a .d per object listing the headers it used, pulled in at the
+# bottom. Without it, editing a header rebuilds nothing: a struct in fake/ was
+# changed once and only half the objects picked it up, so two translation units
+# disagreed about a field's offset and the test failed with values that looked
+# like a logic bug.
+CFLAGS = $(ARCH) $(DEFS) -O2 -g -std=gnu99 -ffreestanding -MMD -MP \
          -fomit-frame-pointer -falign-functions=16 \
          -ffunction-sections -fdata-sections -fsingle-precision-constant \
          -Wall -Wextra $(TESTDEFS) $(CFLAGS_EXTRA) $(patsubst %,-I%,$(INCDIR))
 
 # ChibiOS's .s files are macro-heavy and lowercase .s is not preprocessed
 # unless asked, so assembly needs its own rule rather than riding on CFLAGS.
-AFLAGS = $(ARCH) $(DEFS) -g -x assembler-with-cpp $(patsubst %,-I%,$(INCDIR))
+AFLAGS = $(ARCH) $(DEFS) -g -MMD -MP -x assembler-with-cpp $(patsubst %,-I%,$(INCDIR))
 
 # -specs=nosys.specs is what make/fw.mk uses to satisfy newlib's syscall
 # stubs; ChibiOS's syscalls.c supplies _sbrk_r over __heap_base__ beside it.
@@ -130,5 +148,7 @@ run: $(TEST).elf
 
 clean:
 	rm -rf obj *.elf *.map
+
+-include $(OBJ:.o=.d)
 
 .PHONY: all run clean

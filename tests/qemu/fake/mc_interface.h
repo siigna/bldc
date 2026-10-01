@@ -39,6 +39,10 @@ typedef struct {
 	int released;
 	int set_calls;
 
+	// configuration, and how many times a full reconfigure was asked for
+	mc_configuration mcconf;
+	int mcconf_applied;
+
 	// reset flags the counter getters were passed
 	bool ah_reset, ah_chg_reset, wh_reset, wh_chg_reset;
 	bool tacho_reset, tacho_abs_reset;
@@ -65,6 +69,10 @@ float mc_interface_get_watt_hours_charged(bool reset);
 int mc_interface_get_tachometer_value(bool reset);
 int mc_interface_get_tachometer_abs_value(bool reset);
 mc_fault_code mc_interface_get_fault(void);
+
+/* configuration */
+const volatile mc_configuration *mc_interface_get_configuration(void);
+void mc_interface_set_configuration(mc_configuration *configuration);
 
 /* setters */
 void mc_interface_set_current(float current);
