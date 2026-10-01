@@ -1,0 +1,2 @@
+# Cut out of script/lua_vesc_io.c by the Makefile at build time.
+adc_index.inc
