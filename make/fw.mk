@@ -5,6 +5,10 @@
 
 USE_LISPBM ?= 1
 
+# The Lua engine, as an alternative to LispBM rather than an addition: see
+# script/script.mk. Requires USE_LISPBM=0, and the build stops if both are on.
+USE_LUA ?= 0
+
 # Compiler options here.
 ifeq ($(USE_OPT),)
   USE_OPT = -O2 -fno-math-errno -ggdb -fomit-frame-pointer -falign-functions=16 -std=gnu99 -D_GNU_SOURCE
@@ -121,6 +125,15 @@ ifeq ($(USE_LISPBM),1)
   USE_OPT += -DUSE_LISPBM
 endif
 
+ifeq ($(USE_LUA),1)
+  ifeq ($(USE_LISPBM),1)
+    $(error USE_LUA=1 needs USE_LISPBM=0: the two engines are mutually \
+      exclusive in one build, and on an F405 there is only room for one)
+  endif
+  include script/script.mk
+  USE_OPT += -DUSE_LUA
+endif
+
 # Define linker script file here
 LDSCRIPT= ld_eeprom_emu.ld
 
@@ -154,6 +167,10 @@ CSRC = $(STARTUPSRC) \
 
 ifeq ($(USE_LISPBM),1)
   CSRC += $(LISPBMSRC)
+endif
+
+ifeq ($(USE_LUA),1)
+  CSRC += $(LUASRC)
 endif
 
 # C++ sources that can be compiled in ARM or THUMB mode depending on the global
@@ -204,6 +221,10 @@ include driver/driver.mk
 
 ifeq ($(USE_LISPBM),1)
   INCDIR += $(LISPBMINC)
+endif
+
+ifeq ($(USE_LUA),1)
+  INCDIR += $(LUAINC)
 endif
 
 ifdef app_custom_mkfile
