@@ -35,6 +35,18 @@ ENGINE_SRC = $(wildcard $(TOP)/script/lua/*.c) \
              $(TOP)/script/script_alloc.c \
              $(CHIBIOS)/os/various/syscalls.c
 
+# Every binding set luaif.c registers, with the fakes they compile against.
+#
+# One list rather than a per-test one, because test_luaif links luaif.c and so
+# needs all of them: adding a binding set and registering it broke that test
+# twice, each time caught only by run.sh's build check. Now adding one here
+# fixes both at once.
+BINDING_SRC = $(TOP)/script/lua_vesc_mc.c \
+              $(TOP)/script/lua_vesc_conf.c \
+              $(TOP)/script/lua_vesc_can.c
+BINDING_FAKES = fake/fake_mc.c fake/fake_conf.c fake/fake_can.c
+BINDING_INC = $(TOP)/script $(TOP)/script/lua $(TOP)/util
+
 ifeq ($(TEST),test_engine)
   CSRC += $(ENGINE_SRC)
   INCDIR += $(TOP)/script $(TOP)/script/lua
@@ -63,6 +75,20 @@ ifeq ($(TEST),test_conf)
   INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua
 endif
 
+# test_can compiles lua_vesc_can.c against a fake comm_can whose status caches
+# the test fills in. It links lua_vesc_mc.c too, only for the timeout counter
+# it shares with fake_mc -- the point being to prove the CAN setters do *not*
+# touch it.
+ifeq ($(TEST),test_can)
+  CSRC += $(ENGINE_SRC) \
+          $(TOP)/script/lua_vesc_can.c \
+          $(TOP)/script/lua_vesc_mc.c \
+          fake/fake_mc.c \
+          fake/fake_can.c \
+          fake/fake_conf.c
+  INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua $(TOP)/util
+endif
+
 # test_luaif adds the firmware adapter and the queue it drains. LUAIF_HOST_TEST
 # swaps only flash_helper and the terminal for the stubs in luaif_host.h; the
 # kernel, the engine, the arena and the queue are all the real thing.
@@ -70,14 +96,15 @@ ifeq ($(TEST),test_luaif)
   CSRC += $(ENGINE_SRC) \
           $(TOP)/script/script_queue.c \
           $(TOP)/script/luaif.c \
-          $(TOP)/script/lua_vesc_mc.c \
-          $(TOP)/script/lua_vesc_conf.c \
           $(TOP)/util/buffer.c \
-          fake/fake_mc.c \
-          fake/fake_conf.c
-  # fake/ first, as above: luaif.c registers the motor bindings, so this test
-  # pulls in lua_vesc_mc.c and therefore needs the fake mc_interface too.
-  INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua $(TOP)/util
+          $(BINDING_SRC) \
+          $(BINDING_FAKES)
+  # fake/ first: $(TOP) also has a real timeout.h, and the earlier directory
+  # on the path wins.
+  INCDIR := fake $(INCDIR) $(BINDING_INC)
+  # Without this luaif.c takes its firmware include path and reaches
+  # flash_helper.h, which needs the HW_SOURCE/HW_HEADER defines a board build
+  # supplies.
   TESTDEFS += -DLUAIF_HOST_TEST
 endif
 

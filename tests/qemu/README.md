@@ -107,6 +107,40 @@ and `nm` on the image shows exactly five `luaopen_*` symbols. The
 libc internals in code that is then discarded — `ld` even says the message
 does not account for garbage collection. Measured before doing the work.
 
+## The CAN bindings, and two decisions worth pinning
+
+27 bindings: 14 readers over the status cache, `can_msg_age`, three discovery
+calls, seven remote-command calls, and two raw frame senders. This is the
+first set where a mistake leaves the board, so two decisions are stated in the
+source and pinned by tests rather than left to be inferred.
+
+**Reading an absent controller gives 0, not nil.** That matches lisp, because
+a script ported between the engines must not change behaviour. But zero is a
+*plausible* reading — `canget_rpm` on a controller that is not there is
+indistinguishable from one that is stopped, and the cache keeps the last frame
+forever, so a controller that dropped off the bus mid-ride still reads
+whatever it last said. `can_msg_age` returns **nil** when nothing has been
+heard, and is the only way to tell those apart.
+
+**Commanding another controller does not refresh the local motor timeout.**
+The local timeout is about this board's output; the board being commanded runs
+its own. Adding `timeout_reset` here by analogy with the motor bindings is the
+obvious mistake, so the test asserts its absence — and that mutation was run
+*with* the missing `#include` added, because without it the mutation merely
+fails to compile, which is not the same as being caught.
+
+`can_cmd` is deliberately not exposed. The lisp extension of that name hands a
+command packet to another controller's protocol layer, which is remote control
+of that board rather than a CAN message.
+
+Raw frames refuse an over-long payload rather than truncating it — a frame cut
+short is a different message and the receiver cannot tell — and check the id
+against 11 or 29 bits. A numeric string *is* accepted for an id, because
+`luaL_checkinteger` applies Lua's own coercion; that is recorded in the test so
+it is not mistaken for a missing check.
+
+Eleven mutations, all caught.
+
 ## The motor bindings
 
 `test_bindings` compiles `script/lua_vesc_mc.c` against a fake `mc_interface`
