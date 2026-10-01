@@ -78,6 +78,18 @@ ifeq ($(TEST),test_conf)
   INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua
 endif
 
+# test_script runs script/examples/bench_throttle.lua. The source is embedded
+# from the real file by the rule below, so the test cannot drift from what
+# gets uploaded. The io bindings here are the stand-ins in fake_io.c, not
+# script/lua_vesc_io.c -- see the note in that file.
+ifeq ($(TEST),test_script)
+  CSRC += $(ENGINE_SRC) \
+          $(TOP)/script/lua_vesc_mc.c \
+          fake/fake_mc.c \
+          fake/fake_io.c
+  INCDIR := fake $(INCDIR) $(BINDING_INC) .
+endif
+
 # test_can compiles lua_vesc_can.c against a fake comm_can whose status caches
 # the test fills in. It links lua_vesc_mc.c too, only for the timeout counter
 # it shares with fake_mc -- the point being to prove the CAN setters do *not*
@@ -163,6 +175,17 @@ all: $(TEST).elf
 $(OBJDIR):
 	@mkdir -p $(OBJDIR)
 
+# The example script, as a C string literal. Generated rather than pasted so
+# the test runs the file that actually ships; the guard catches an empty or
+# truncated conversion instead of testing nothing.
+bench_throttle.inc: $(TOP)/script/examples/bench_throttle.lua Makefile
+	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
+	@test -s $@ || { echo "bench_throttle.inc is empty"; rm -f $@; exit 1; }
+	@grep -q 'M.step' $@ || { echo "bench_throttle.inc looks truncated"; \
+		rm -f $@; exit 1; }
+
+$(OBJDIR)/test_script.o: bench_throttle.inc
+
 $(OBJDIR)/%.o: %.c | $(OBJDIR)
 	@arm-none-eabi-gcc $(CFLAGS) -c -o $@ $<
 
@@ -177,7 +200,7 @@ run: $(TEST).elf
 	@timeout 60 $(QEMU) $(QEMUFLAGS) -kernel $(TEST).elf
 
 clean:
-	rm -rf obj *.elf *.map
+	rm -rf obj *.elf *.map bench_throttle.inc
 
 -include $(OBJ:.o=.d)
 

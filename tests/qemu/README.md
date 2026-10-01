@@ -107,6 +107,46 @@ and `nm` on the image shows exactly five `luaopen_*` symbols. The
 libc internals in code that is then discarded — `ld` even says the message
 does not account for garbage collection. Measured before doing the work.
 
+## The bench script
+
+`script/examples/bench_throttle.lua` is what will drive a motor the first time
+a Lua build drives one — a 3625 1800kv outrunner on a stand with nothing on
+the shaft. `test_script` runs it, with the source **embedded from the real
+file** so the test cannot drift from what gets uploaded, and a guard that fails
+the build if the conversion comes out empty or truncated.
+
+The script declares its table `local` and returns it, which is what a
+`require` of it would use. The test wraps the source in a function call and
+assigns the result to a global, rather than adding a test-shaped global to the
+script — the file stays deployable as it stands.
+
+Its safety properties, each with a check:
+
+- **Starts disarmed.** A board that powers up with the throttle held does
+  nothing until the stick returns to zero.
+- **A stale input coasts the motor *and* disarms.** The RC decoder holds its
+  last value, so a transmitter switched off reads as whatever it last said.
+  Disarming is what stops a dropout-at-full-throttle from spinning up the
+  instant the link returns — the test checks exactly that sequence.
+- **Rate limited upward only.** 120 mA on the first 20 ms step at 6 A/s;
+  releasing the throttle drops to zero in one step.
+- **A pot reading below its rest voltage is a fault, not a closed throttle.**
+  A broken wire must not be indistinguishable from working correctly.
+- **Zero throttle coasts rather than holding zero current.** Holding zero still
+  regulates, which on a stand is a shaft that resists being turned by hand.
+
+Nine mutations of the script, seven caught immediately. The two survivors were
+both real gaps: nothing distinguished coasting from holding zero current, and
+the current cap was redundant because the ADC path clamped to 1 while the PPM
+path clamped only the lower end. Fixing the PPM clamp then made cap and clamp
+cover each other, so **neither is individually detectable** — removing both
+gives 8 A against a 4 A cap, which is how the pair was shown to be
+load-bearing.
+
+A third defect was in the test rather than the script: a check for note 1 looked
+for a global the script never sets and ended in `|| true`, so it passed
+unconditionally. It now greps the embedded source.
+
 ## What the input bindings could *not* be tested with here
 
 `script/lua_vesc_io.c` is **not linked into any of these images**, and that is
