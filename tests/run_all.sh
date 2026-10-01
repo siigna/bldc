@@ -2,12 +2,13 @@
 #
 # Every test in this tree that does not need hardware.
 #
-# There are nine suites in three styles, and running them one at a time is how
+# There are ten suites in three styles, and running them one at a time is how
 # a breakage gets missed: twice while the script engine was being built, a
 # change broke a suite that was not the one being worked on, and both times it
 # surfaced only because something else happened to rebuild it.
 #
-#   nix-shell -p gcc gnumake python3 gcc-arm-embedded qemu --run ./tests/run_all.sh
+#   nix-shell -p gcc gnumake python3 gcc-arm-embedded qemu gtest \
+#       --run ./tests/run_all.sh
 #
 # Exit status is zero only if every suite passed. Three rules, each of which
 # this tree has been bitten by:
@@ -24,14 +25,14 @@ cd "$(dirname "$0")"
 
 # Plain C, built and run by their own Makefile.
 MAKE_SUITES="angles float_serialization packet_recovery script_pack
-             script_queue script_alloc lua_adc"
+             script_queue script_alloc lua_adc utils_math"
 
 # Suites with a runner of their own.
 SH_SUITES="conf_table qemu"
 
-# Not run, and why. Printed every time so the omission stays visible.
-SKIPPED="utils_math:wants Google Test sources to build gtest-all.cc and points
-         at utils_math.c in its old location; bit-rotted, not yet fixed"
+# Not run, and why. Printed every time so the omission stays visible. Empty is
+# a result worth seeing too.
+SKIPPED=""
 
 passed=0
 failed=0
@@ -88,7 +89,11 @@ for s in $SH_SUITES; do
 done
 
 printf '== not run ==\n'
-printf '%s\n' "$SKIPPED" | tr -s ' \n' ' ' | sed 's/^/  /;s/$/\n/'
+if [ -z "$SKIPPED" ]; then
+    printf '  (nothing)\n'
+else
+    printf '%s\n' "$SKIPPED" | tr -s ' \n' ' ' | sed 's/^/  /;s/$/\n/'
+fi
 
 printf '\n%d suite(s) passed, %d failed\n' "$passed" "$failed"
 if [ "$failed" -ne 0 ]; then
