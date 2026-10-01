@@ -1,6 +1,28 @@
 #!/usr/bin/env sh
 #
-# Every test in this tree that does not need hardware.
+# Every test on this branch that does not need hardware.
+#
+# OVERLAP, READ BEFORE MERGING. The app-pas-fixes branch already has
+# tests/check.sh, which opens with the same sentence and does strictly more
+# than this: the same style of per-suite pass/fail, plus address and undefined
+# sanitizers, cppcheck, clang-tidy, coverage, a property fuzzer and a
+# configuration-signature check. This file was written without looking for it,
+# which was a mistake -- that branch is on origin.
+#
+# Neither is a superset of the other, so the two have to be reconciled rather
+# than one deleted:
+#
+#   only in check.sh      app_pas (run-all and run-san), overvoltage_fault,
+#                         confsig, and every analysis stage
+#   only in this file     script_pack, script_queue, script_alloc, lua_adc,
+#                         utils_math, conf_table, qemu
+#   in both               angles, packet_recovery, float_serialization
+#
+# When these branches meet, check.sh is the one to keep -- it is the older
+# entry point and has the analysis stages -- and the suites listed above as
+# only here should move into it. The three rules below are worth carrying
+# across; check.sh does not clean before building, so it can test a stale
+# binary.
 #
 # There are ten suites in three styles, and running them one at a time is how
 # a breakage gets missed: twice while the script engine was being built, a
