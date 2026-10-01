@@ -68,11 +68,44 @@ on no hot path.
 A comment I had written claimed `CONF_INT` was only emitted for int-sized
 members. It was false when I wrote it.
 
+### A strcmp chain per operation cost 8 KB
+
+Naming the member fixed the correctness problem but was first written as a
+`strcmp` chain per operation — read, write and flags lookup, each for both
+configurations. Six chains over 136 names inlines a call site per name per
+chain, and compiled to **16,410 bytes**: the third largest object in the whole
+firmware, larger than `mc_interface.o`.
+
+The name is now resolved once to an index by a single loop, and everything
+after that is a switch over a dense index space. **7,847 bytes**, and
+`flash2` went from 87.09% to 85.29%.
+
+A linear scan rather than a binary search, deliberately: one loop of 136
+`strcmp`s is a few dozen bytes of code, a sorted-index array would be faster
+and bigger, and `conf_get` is on no hot path.
+
+Two static asserts hold the index space to the generated counts. They are
+not decoration — a draft of the enum had a marker enumerator assigned
+`CONF_MC_PARAM_COUNT`, which restarts the implicit numbering and pushed every
+app index one slot past its name, leaving one parameter reading zero and one
+switch case unreachable. The assert catches that at compile time, which was
+checked by putting the marker back.
+
 ### Measured
 
 Walking all 143 names from Lua peaks at **20,174 bytes** of script memory —
 essentially the firmware's entire 20 KB ceiling. A script that enumerates the
 configuration has no room left for anything else.
+
+### What is *not* a flash win
+
+The sandbox opens only base, coroutine, string, table and math, so excluding
+`liolib`, `loslib`, `ldblib`, `lutf8lib` and `loadlib` from the build looks
+like free space. It is not: `--gc-sections` has already dropped all of them,
+and `nm` on the image shows exactly five `luaopen_*` symbols. The
+`_open`/`_kill`/`_times` "not implemented" warnings at link time come from
+libc internals in code that is then discarded — `ld` even says the message
+does not account for garbage collection. Measured before doing the work.
 
 ## The motor bindings
 

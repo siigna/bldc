@@ -204,6 +204,12 @@ def render(entries):
     out.append(' * neighbours, and arm-none-eabi defaults to -fshort-enums, so an enum\'s')
     out.append(' * width cannot be known from the declaration either.')
     out.append(' *')
+    out.append(' * The first argument is the parameter name as a bare identifier, so it')
+    out.append(' * can be both stringified and pasted into an enumerator. That lets the')
+    out.append(' * lists drive one name array and two switches instead of a strcmp chain')
+    out.append(' * per operation -- six chains over 136 names compiled to 16 KB, which')
+    out.append(' * was the third largest object in the firmware.')
+    out.append(' *')
     out.append(' * Flags, both derived from the conf-set arm:')
     out.append(' *')
     out.append(' *   CONF_NEG_ABS  stored negative, given as a positive magnitude, which')
@@ -222,13 +228,13 @@ def render(entries):
     out.append('')
     out.append('#define CONF_MC_PARAMS(X) \\')
     for name, _owner, field, flags in mc:
-        out.append('\tX("%s", %s, %s) \\'
+        out.append('\tX(%s, %s, %s) \\'
                    % (name.replace('-', '_'), flags, field))
     out.append('\t/* end */')
     out.append('')
     out.append('#define CONF_APP_PARAMS(X) \\')
     for name, _owner, field, flags in app:
-        out.append('\tX("%s", %s, %s) \\'
+        out.append('\tX(%s, %s, %s) \\'
                    % (name.replace('-', '_'), flags, field))
     out.append('\t/* end */')
     out.append('')

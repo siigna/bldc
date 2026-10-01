@@ -53,85 +53,117 @@
 #include "lua_vesc_conf_table.h"
 
 /*
- * Reading and writing go through generated code that names the struct member,
- * so the compiler chooses the load and the store.
+ * Reading and writing go through generated switches that name the struct
+ * member, so the compiler chooses the load and the store.
  *
- * The first version of this used a table of byte offsets plus a width
- * classification, and got the widths wrong in a way that only a target could
- * show: uint8_t and uint16_t members were read four bytes wide, which is both
- * unaligned -- a HardFault with UFSR.UNALIGNED on a Cortex-M4, since a float
- * load uses VLDR and that has no unaligned form -- and overlapping the
- * neighbouring fields. arm-none-eabi also defaults to -fshort-enums, so an
- * enum's width is not knowable from its declaration, which makes the whole
- * approach unfixable rather than merely buggy.
+ * Two earlier designs were wrong, in different ways:
  *
- * The cost is a strcmp chain, which is what the lisp extensions do as well,
- * and conf_get is not on any hot path.
+ * A table of byte offsets plus a width classification HardFaulted with
+ * UFSR.UNALIGNED. uint8_t and uint16_t members were classified as int and
+ * read four bytes wide -- both unaligned and overlapping the neighbours --
+ * and a float read through a cast compiles to VLDR, which has no unaligned
+ * form on a Cortex-M4. arm-none-eabi also defaults to -fshort-enums, so an
+ * enum's width is not knowable from its declaration, which makes offsets
+ * unfixable rather than merely buggy.
+ *
+ * Naming the member fixed that but was then written as a strcmp chain per
+ * operation -- read, write and flags lookup, each for both configurations.
+ * Six chains over 136 names inlined a strcmp call site per name per chain and
+ * came to 16,410 bytes, the third largest object in the firmware, larger than
+ * mc_interface.o. So the name is resolved once to an index by a single loop,
+ * and everything after that is a switch.
  */
 
-static bool conf_read(const char *name, float *out) {
-	const mc_configuration *mc =
-			(const mc_configuration *)mc_interface_get_configuration();
-	const app_configuration *app = app_get_configuration();
-
-#define X(nm, fl, field) \
-	if (strcmp(name, nm) == 0) { *out = (float)mc->field; return true; }
+/*
+ * One index space, motor parameters first, matching the order the name and
+ * flag arrays are built in. No marker enumerator between the two lists: an
+ * earlier draft had one assigned CONF_MC_PARAM_COUNT, which restarts the
+ * implicit numbering and pushed every app index one past its slot in
+ * m_names, leaving one parameter reading zero and one switch case
+ * unreachable.
+ */
+enum {
+#define X(nm, fl, field) CONF_IDX_##nm,
 	CONF_MC_PARAMS(X)
-#undef X
-
-#define X(nm, fl, field) \
-	if (strcmp(name, nm) == 0) { *out = (float)app->field; return true; }
 	CONF_APP_PARAMS(X)
 #undef X
+	CONF_IDX_COUNT
+};
 
-	return false;
-}
+_Static_assert(CONF_IDX_COUNT == CONF_MC_PARAM_COUNT + CONF_APP_PARAM_COUNT,
+		"the index space and the generated counts disagree");
 
-static void conf_write_mc(mc_configuration *mc, const char *name, float v) {
-#define X(nm, fl, field)                                                     \
-	if (strcmp(name, nm) == 0) {                                             \
-		mc->field = (((fl) & CONF_NEG_ABS) != 0)                             \
-				? (__typeof__(mc->field)) - fabsf(v)                         \
-				: (__typeof__(mc->field))v;                                  \
-		return;                                                              \
+static const char *const m_names[] = {
+#define X(nm, fl, field) #nm,
+	CONF_MC_PARAMS(X)
+	CONF_APP_PARAMS(X)
+#undef X
+};
+
+static const uint8_t m_flags[] = {
+#define X(nm, fl, field) (fl),
+	CONF_MC_PARAMS(X)
+	CONF_APP_PARAMS(X)
+#undef X
+};
+
+_Static_assert(sizeof(m_names) / sizeof(m_names[0])
+		== (CONF_MC_PARAM_COUNT + CONF_APP_PARAM_COUNT),
+		"the name array and the generated counts disagree");
+_Static_assert(sizeof(m_flags) / sizeof(m_flags[0])
+		== (CONF_MC_PARAM_COUNT + CONF_APP_PARAM_COUNT),
+		"the flag array and the generated counts disagree");
+
+/*
+ * A linear scan, not a binary search. One loop of 136 strcmps is a few dozen
+ * bytes of code; a sorted-index array would be faster and bigger, and
+ * conf_get is on no hot path. Returns -1 for an unknown name.
+ */
+static int index_of(const char *name) {
+	for (int i = 0; i < (int)(sizeof(m_names) / sizeof(m_names[0])); i++) {
+		if (strcmp(m_names[i], name) == 0) {
+			return i;
+		}
 	}
-	CONF_MC_PARAMS(X)
-#undef X
+	return -1;
 }
 
-static void conf_write_app(app_configuration *app, const char *name, float v) {
-#define X(nm, fl, field)                                                     \
-	if (strcmp(name, nm) == 0) {                                             \
-		app->field = (((fl) & CONF_NEG_ABS) != 0)                            \
-				? (__typeof__(app->field)) - fabsf(v)                        \
-				: (__typeof__(app->field))v;                                 \
-		return;                                                              \
+static bool is_mc_index(int idx) {
+	return idx < CONF_MC_PARAM_COUNT;
+}
+
+static float read_index(int idx, const mc_configuration *mc,
+		const app_configuration *app) {
+	switch (idx) {
+#define X(nm, fl, field) case CONF_IDX_##nm: return (float)mc->field;
+	CONF_MC_PARAMS(X)
+#undef X
+#define X(nm, fl, field) case CONF_IDX_##nm: return (float)app->field;
+	CONF_APP_PARAMS(X)
+#undef X
+	default:
+		return 0.0f;
 	}
-	CONF_APP_PARAMS(X)
-#undef X
 }
 
-/* Which configuration a name belongs to, and how it has to be applied. */
-static bool conf_lookup(const char *name, bool *is_mc, uint8_t *flags) {
-#define X(nm, fl, field)                                                     \
-	if (strcmp(name, nm) == 0) { *is_mc = true; *flags = (fl); return true; }
+static void write_index(int idx, mc_configuration *mc,
+		app_configuration *app, float v) {
+	if ((m_flags[idx] & CONF_NEG_ABS) != 0) {
+		v = -fabsf(v);
+	}
+
+	switch (idx) {
+#define X(nm, fl, field) \
+	case CONF_IDX_##nm: mc->field = (__typeof__(mc->field))v; return;
 	CONF_MC_PARAMS(X)
 #undef X
-
-#define X(nm, fl, field)                                                     \
-	if (strcmp(name, nm) == 0) { *is_mc = false; *flags = (fl); return true; }
+#define X(nm, fl, field) \
+	case CONF_IDX_##nm: app->field = (__typeof__(app->field))v; return;
 	CONF_APP_PARAMS(X)
 #undef X
-
-	return false;
-}
-
-/* Every name, for conf_names and for a test to walk. */
-static void conf_each_name(void (*fn)(const char *, void *), void *ud) {
-#define X(nm, fl, field) fn(nm, ud);
-	CONF_MC_PARAMS(X)
-	CONF_APP_PARAMS(X)
-#undef X
+	default:
+		return;
+	}
 }
 
 /* ------------------------------------------------------------- specials -- */
@@ -189,8 +221,15 @@ static int l_conf_get(lua_State *L) {
 	const mc_configuration *mc =
 			(const mc_configuration *)mc_interface_get_configuration();
 	float value = 0.0f;
+	int idx = index_of(name);
 
-	if (conf_read(name, &value) || conf_scaled_read(mc, name, &value)) {
+	if (idx >= 0) {
+		lua_pushnumber(L, (lua_Number)read_index(idx, mc,
+				app_get_configuration()));
+		return 1;
+	}
+
+	if (conf_scaled_read(mc, name, &value)) {
 		lua_pushnumber(L, (lua_Number)value);
 		return 1;
 	}
@@ -217,7 +256,12 @@ static int l_conf_get(lua_State *L) {
 }
 
 /* Perform the write, whichever kind of parameter it is. */
-static void do_write_mc(mc_configuration *mc, const char *name, float v) {
+static void do_write(int idx, mc_configuration *mc, app_configuration *app,
+		const char *name, float v) {
+	if (idx >= 0) {
+		write_index(idx, mc, app, v);
+		return;
+	}
 	if (conf_scaled_write(mc, name, v)) {
 		return;
 	}
@@ -225,44 +269,38 @@ static void do_write_mc(mc_configuration *mc, const char *name, float v) {
 		mc->l_min_erpm = -fabsf(v) * speed_factor(mc);
 		return;
 	}
-	if (strcmp(name, "max_speed") == 0) {
-		mc->l_max_erpm = v * speed_factor(mc);
-		return;
-	}
-	conf_write_mc(mc, name, v);
+	mc->l_max_erpm = v * speed_factor(mc);
 }
 
 static int l_conf_set(lua_State *L) {
 	const char *name = luaL_checkstring(L, 1);
 	float value = (float)luaL_checknumber(L, 2);
 
-	bool is_mc = true;
-	uint8_t flags = CONF_PLAIN;
-	bool known = conf_lookup(name, &is_mc, &flags);
+	int idx = index_of(name);
+	bool is_mc;
+	bool needs_apply;
 
-	if (!known) {
+	if (idx >= 0) {
+		is_mc = is_mc_index(idx);
+		needs_apply = (m_flags[idx] & CONF_APPLY) != 0;
+	} else {
 		const mc_configuration *probe =
 				(const mc_configuration *)mc_interface_get_configuration();
 		float ignored;
 
+		is_mc = true;
 		if (conf_scaled_read(probe, name, &ignored)) {
-			/* every scaled constant is a FOC parameter, and lisp applies
-			 * all of those through a reconfigure */
-			known = true;
-			is_mc = true;
-			flags = CONF_APPLY;
+			/* every scaled constant is a FOC parameter, and lisp applies all
+			 * of those through a reconfigure */
+			needs_apply = true;
 		} else if (is_speed_name(name)) {
 			/* these end up in l_min_erpm and l_max_erpm, which lisp writes
 			 * live rather than reconfiguring for */
-			known = true;
-			is_mc = true;
-			flags = CONF_PLAIN;
+			needs_apply = false;
+		} else {
+			lua_pushboolean(L, 0);
+			return 1;
 		}
-	}
-
-	if (!known) {
-		lua_pushboolean(L, 0);
-		return 1;
 	}
 
 	/*
@@ -271,16 +309,16 @@ static int l_conf_set(lua_State *L) {
 	 * and writing one of those through the fast path leaves it looking set
 	 * without having taken effect.
 	 */
-	if ((flags & CONF_APPLY) == 0) {
+	if (!needs_apply) {
 		if (is_mc) {
 			mc_configuration *mc =
 					(mc_configuration *)mc_interface_get_configuration();
-			do_write_mc(mc, name, value);
+			do_write(idx, mc, NULL, name, value);
 			commands_apply_mcconf_hw_limits(mc);
 		} else {
 			app_configuration *app =
 					(app_configuration *)app_get_configuration();
-			conf_write_app(app, name, value);
+			do_write(idx, NULL, app, name, value);
 			commands_apply_appconf_hw_limits(app);
 		}
 		lua_pushboolean(L, 1);
@@ -295,7 +333,7 @@ static int l_conf_set(lua_State *L) {
 			return 1;
 		}
 		*mc = *mc_interface_get_configuration();
-		do_write_mc(mc, name, value);
+		do_write(idx, mc, NULL, name, value);
 		commands_apply_mcconf_hw_limits(mc);
 		mc_interface_set_configuration(mc);
 		mempools_free_mcconf(mc);
@@ -307,7 +345,7 @@ static int l_conf_set(lua_State *L) {
 			return 1;
 		}
 		*app = *app_get_configuration();
-		conf_write_app(app, name, value);
+		do_write(idx, NULL, app, name, value);
 		commands_apply_appconf_hw_limits(app);
 		app_set_configuration(app);
 		mempools_free_appconf(app);
@@ -321,30 +359,25 @@ static int l_conf_set(lua_State *L) {
  * Every name the two above accept, so a script can discover them and a test
  * can walk all of them rather than sampling.
  */
-typedef struct {
-	lua_State *L;
-	int n;
-} name_push_t;
-
-static void push_name(const char *name, void *ud) {
-	name_push_t *p = (name_push_t *)ud;
-
-	lua_pushstring(p->L, name);
-	lua_rawseti(p->L, -2, p->n++);
-}
-
 static int l_conf_names(lua_State *L) {
-	name_push_t p = {L, 1};
+	int n = 1;
 
 	lua_newtable(L);
-	conf_each_name(push_name, &p);
+	for (size_t i = 0; i < sizeof(m_names) / sizeof(m_names[0]); i++) {
+		lua_pushstring(L, m_names[i]);
+		lua_rawseti(L, -2, n++);
+	}
 
-#define X(nm, sc, field) push_name(nm, &p);
+#define X(nm, sc, field) \
+	lua_pushstring(L, nm); \
+	lua_rawseti(L, -2, n++);
 	CONF_SCALED(X)
 #undef X
 
-	push_name("min_speed", &p);
-	push_name("max_speed", &p);
+	lua_pushstring(L, "min_speed");
+	lua_rawseti(L, -2, n++);
+	lua_pushstring(L, "max_speed");
+	lua_rawseti(L, -2, n++);
 	return 1;
 }
 
