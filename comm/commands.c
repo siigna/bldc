@@ -53,6 +53,18 @@
 #include "crc.h"
 #ifdef USE_LISPBM
 #include "lispif.h"
+#else
+/*
+ * The script print prefix, which lispif.h provides when LispBM is compiled
+ * in. Without it commands_printf_lisp still needs one: it is the script
+ * output channel whatever language the script is written in, and with
+ * USE_LISPBM=0 the two calls below were left undeclared -- so they defaulted
+ * to int and the build failed on a modern compiler. The flag exists but the
+ * path had rotted.
+ */
+static char *lispif_print_prefix(void) {
+	return "%s";
+}
 #endif
 #include "main.h"
 #include "conf_custom.h"
