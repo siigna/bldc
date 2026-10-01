@@ -21,4 +21,20 @@ int commands_printf_lisp(const char *format, ...);
 const char *luaif_host_output(void);
 void luaif_host_output_reset(void);
 
+/*
+ * Replaces mempools' shared packet buffer. The real one is handed out from a
+ * pool shared with the comms path; a single static buffer is equivalent for
+ * one caller at a time, which is all luaif_process_cmd ever is.
+ */
+uint8_t *mempools_get_packet_buffer(void);
+void mempools_free_packet_buffer(uint8_t *buffer);
+
+/*
+ * Replaces utils.h's nestable scheduler lock. chSysLock is not nestable and
+ * the real helpers count, which is why luaif.c uses them rather than locking
+ * directly.
+ */
+void utils_sys_lock_cnt(void);
+void utils_sys_unlock_cnt(void);
+
 #endif /* LUAIF_HOST_H_ */

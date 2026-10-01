@@ -23,6 +23,39 @@ Sizing the engine thread's working area is otherwise a bench job, and `.ram4`
 has very little slack. The figure is exact: a 400-byte local in the thread
 moves it by exactly 400.
 
+## What it found in the protocol handler
+
+`test_luaif` also drives the `COMM_LISP_*` packets the way `commands.c` does.
+Three things came out of that:
+
+**The REPL must not run on the thread that received the packet.** Building and
+calling a chunk needs ~2 KB of stack before the script does anything. Running
+it on the caller gave a HardFault with the PC set to the `0x55555555` stack
+fill pattern, several frames from the cause. `script_event.h`'s own note about
+`SCRIPT_EV_REPL` says exactly this -- the same mistake had already been made
+and fixed in vesc_express -- and it was made again here anyway. Evaluation now
+goes to the engine thread through a dedicated slot.
+
+**The protocol has to be tested on a comms-sized stack.** Driving it from
+`main` was both unfaithful and too small: `commands_process_packet` runs on
+`comm_usb`'s `serial_process_thread`, whose working area is 2048 bytes, while
+main's process stack is 0x800. The checks faulted intermittently with
+`UFSR.INVPC`, three runs in five. Measured on a 2048-byte thread,
+`luaif_process_cmd` uses **1,648 of 2,384 bytes** -- and that figure includes
+the test's own `vsnprintf`, which the real `commands_printf_lisp` does not do
+on the caller's stack.
+
+**One passing run proves nothing about a flaky test.** The variable list is
+best-effort by design: `append_globals` takes the lock with `chMtxTryLock`,
+because the engine thread holds it while dispatching and waiting would hang
+the connection on a busy script. So a single `GET_STATS` can legitimately
+return no variables. The first version asserted on one poll and passed by
+luck; it now polls until they appear, which is what VESC Tool does anyway.
+
+Eight mutations of the handler, all caught, including the one that reproduces
+the REPL stack fault and the one that copies lispif's habit of passing the
+read index to `reply_func` instead of the built length.
+
 ## What it found: three bugs in the firmware adapter
 
 `test_luaif` runs `script/luaif.c` -- the engine thread, the lifecycle and the

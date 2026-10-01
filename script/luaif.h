@@ -85,6 +85,24 @@ int luaif_get_restart_cnt(void);
  */
 void luaif_process_can(uint32_t can_id, uint8_t *data8, int len, bool is_ext);
 
+/*
+ * Handle a COMM_LISP_* packet, with data[0] the packet id.
+ *
+ * The container format and these packet ids are shared with LispBM
+ * deliberately, so VESC Tool's existing upload, erase and REPL carry Lua
+ * unchanged. Code upload is not here at all: COMM_LISP_READ_CODE,
+ * _WRITE_CODE and _ERASE_CODE are handled in commands.c against
+ * flash_helper, with no engine involved, so they already work in a USE_LUA
+ * build.
+ *
+ * What is here is the five that need an engine: SET_RUNNING, GET_STATS,
+ * REPL_CMD and STREAM_CODE. RMSG is lisp-specific -- it dispatches to a
+ * lisp recv-rmsg channel that has no Lua equivalent yet -- and is answered
+ * rather than ignored, so the sender sees a refusal instead of a timeout.
+ */
+void luaif_process_cmd(unsigned char *data, unsigned int len,
+		void (*reply_func)(unsigned char *data, unsigned int len));
+
 // Deliver a COMM_CUSTOM_APP_DATA payload, same queueing rules as CAN.
 void luaif_process_custom_app_data(unsigned char *data, unsigned int len);
 

@@ -1638,15 +1638,9 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 #ifdef USE_LISPBM
 		lispif_process_cmd(data - 1, len + 1, reply_func);
 #endif
-		/*
-		 * No USE_LUA arm here yet. These are the COMM_LISP_* packets -- code
-		 * upload, erase, REPL, stats -- and the Lua engine has no handler for
-		 * them, so a USE_LUA build currently runs whatever is already in
-		 * flash and offers no way to put it there. That protocol handler is
-		 * the next piece; arming this site before it exists would answer
-		 * VESC Tool's uploads with silence, which looks like a hung board
-		 * rather than a missing feature.
-		 */
+#ifdef USE_LUA
+		luaif_process_cmd(data - 1, len + 1, reply_func);
+#endif
 		break;
 	}
 

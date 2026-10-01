@@ -16,6 +16,8 @@
 #include "luaif_host.h"
 #include "script_alloc.h"
 #include "script_pack.h"
+#include "datatypes.h"
+#include "buffer.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -128,7 +130,356 @@ void luaif_host_output_reset(void) {
 	m_out[0] = '\0';
 }
 
+/* Progress markers: a passing check prints nothing, so without these a hang
+ * or a fault gives no clue which stage it happened in. */
+#define STAGE(s) do { qrt_puts("  .. "); qrt_puts(s); qrt_puts("\r\n"); } while (0)
+
+/* --------------------------------------------- firmware odds and ends -- */
+
+static uint8_t m_packet_buf[512];
+static int m_packet_buf_out;
+
+uint8_t *mempools_get_packet_buffer(void) {
+	m_packet_buf_out++;
+	return m_packet_buf;
+}
+
+void mempools_free_packet_buffer(uint8_t *buffer) {
+	(void)buffer;
+	m_packet_buf_out--;
+}
+
+/* The real ones count, so nesting is safe; so must these. */
+static int m_lock_depth;
+
+void utils_sys_lock_cnt(void) {
+	if (m_lock_depth++ == 0) {
+		chSysLock();
+	}
+}
+
+void utils_sys_unlock_cnt(void) {
+	if (--m_lock_depth == 0) {
+		chSysUnlock();
+	}
+}
+
+/* ------------------------------------------------- captured packet reply -- */
+
+static uint8_t m_reply[512];
+static unsigned int m_reply_len;
+static int m_reply_count;
+
+static void capture_reply(unsigned char *data, unsigned int len) {
+	m_reply_len = (len < sizeof(m_reply)) ? len : sizeof(m_reply);
+	memcpy(m_reply, data, m_reply_len);
+	m_reply_count++;
+}
+
+static void reply_reset(void) {
+	m_reply_len = 0;
+	m_reply_count = 0;
+}
+
+/*
+ * Drive one COMM_LISP_* packet the way commands.c does: the id is data[0]
+ * and the length includes it.
+ */
+static uint8_t m_pkt[320];
+
+static void send_cmd(uint8_t id, const uint8_t *payload, unsigned int n) {
+	uint8_t *pkt = m_pkt;
+
+	pkt[0] = id;
+	if (n > 0u) {
+		memcpy(pkt + 1, payload, n);
+	}
+	luaif_process_cmd(pkt, n + 1u, capture_reply);
+}
+
 /* ------------------------------------------------------------------ tests -- */
+
+/* Sized like comm_usb's serial_process_thread, which is what really calls
+ * commands_process_packet and therefore luaif_process_cmd. */
+static THD_WORKING_AREA(wa_proto, 2048);
+
+static THD_FUNCTION(proto_thread, arg) {
+	(void)arg;
+	chRegSetThreadName("proto");
+
+	/*
+	 * --- the COMM_LISP_* protocol -------------------------------------
+	 *
+	 * Driven exactly as commands.c drives it. Code upload is not tested here
+	 * because it is not in this engine: READ/WRITE/ERASE_CODE go straight to
+	 * flash_helper in commands.c with no engine involved.
+	 */
+	STAGE("protocol: set_running");
+	luaif_host_output_reset();
+	flash_write_script("vtTest = 42\nprint('proto=ok')\n", true);
+	{
+		uint8_t on[1] = {1};
+
+		reply_reset();
+		send_cmd(COMM_LISP_SET_RUNNING, on, 1);
+		qrt_expect("set_running replied once", (unsigned)m_reply_count, 1u);
+		qrt_expect("set_running reply length", m_reply_len, 2u);
+		qrt_expect("set_running echoes the id",
+				m_reply[0], (unsigned)COMM_LISP_SET_RUNNING);
+		qrt_expect("set_running reports success", m_reply[1], 1u);
+		qrt_expect_ok("the script ran",
+				strstr(luaif_host_output(), "proto=ok") != NULL);
+	}
+
+	STAGE("protocol: get_stats");
+	{
+		uint8_t all[1] = {1};
+		int32_t ind = 0;
+		float cpu, heap, mem, stack;
+
+		reply_reset();
+		send_cmd(COMM_LISP_GET_STATS, all, 1);
+		qrt_expect("get_stats replied once", (unsigned)m_reply_count, 1u);
+		qrt_expect("get_stats echoes the id",
+				m_reply[0], (unsigned)COMM_LISP_GET_STATS);
+
+		ind = 1;
+		cpu   = buffer_get_float16(m_reply, 1e2, &ind);
+		heap  = buffer_get_float16(m_reply, 1e2, &ind);
+		mem   = buffer_get_float16(m_reply, 1e2, &ind);
+		stack = buffer_get_float16(m_reply, 1e2, &ind);
+
+		qrt_puts("  stats cpu=");   qrt_putu((unsigned)cpu);
+		qrt_puts("% mem=");         qrt_putu((unsigned)mem);
+		qrt_puts("% stack=");       qrt_putu((unsigned)stack);
+		qrt_puts("%\r\n");
+
+		qrt_expect_ok("cpu is a percentage", (cpu >= 0.0f) && (cpu <= 100.0f));
+		qrt_expect_ok("heap is a percentage",
+				(heap >= 0.0f) && (heap <= 100.0f));
+		qrt_expect_ok("memory use is reported", mem > 0.0f);
+		/* lisp sends 0 here; this engine has the figure for free */
+		qrt_expect_ok("stack use is reported, not stubbed", stack > 0.0f);
+
+		qrt_expect("result string is empty", m_reply[ind], 0u);
+		ind++;
+
+		qrt_expect("packet buffer was returned",
+				(unsigned)m_packet_buf_out, 0u);
+	}
+
+	/*
+	 * The variable list is best-effort and the test has to say so.
+	 *
+	 * append_globals only takes the lock with chMtxTryLock, because the
+	 * engine thread holds it while dispatching and this runs on the comms
+	 * thread -- waiting would hang the connection on a busy script. So a
+	 * single GET_STATS can legitimately come back with no variables at all,
+	 * and VESC Tool's plots can show a gap. Asserting on one poll passes or
+	 * fails by luck, which is exactly what it did first.
+	 */
+	STAGE("protocol: get_stats variables");
+	{
+		bool found = false;
+		int attempts = 0;
+
+		for (attempts = 0; (attempts < 40) && !found; attempts++) {
+			int32_t ind;
+
+			reply_reset();
+			send_cmd(COMM_LISP_GET_STATS, (uint8_t[]){1}, 1);
+
+			ind = 1 + 8 + 1;        /* four float16 and the result byte */
+			if ((unsigned)ind < m_reply_len) {
+				const char *name = (const char *)(m_reply + ind);
+				if (strcmp(name, "vtTest") == 0) {
+					int32_t vind = ind + (int32_t)strlen(name) + 1;
+					float value = buffer_get_float32_auto(m_reply, &vind);
+
+					qrt_puts("  global ");
+					qrt_puts(name);
+					qrt_puts("=");
+					qrt_putu((unsigned)value);
+					qrt_puts(" after ");
+					qrt_putu((unsigned)attempts + 1u);
+					qrt_puts(" poll(s)\r\n");
+					qrt_expect_ok("the global carries its value",
+							(value > 41.0f) && (value < 43.0f));
+					found = true;
+				}
+			}
+			if (!found) {
+				chThdSleepMilliseconds(5);
+			}
+		}
+
+		qrt_expect_ok("a numeric global is reported within a few polls",
+				found);
+	}
+
+	STAGE("protocol: get_stats filtered");
+	{
+		uint8_t none[1] = {0};
+		unsigned int all_len;
+
+		reply_reset();
+		send_cmd(COMM_LISP_GET_STATS, (uint8_t[]){1}, 1);
+		all_len = m_reply_len;
+
+		reply_reset();
+		send_cmd(COMM_LISP_GET_STATS, none, 1);
+		/* vtTest starts with "vt", so the filter keeps it either way: the
+		 * point is only that the flag is read and nothing is dropped. */
+		qrt_expect("filtered reply still carries vtTest",
+				m_reply_len, all_len);
+	}
+
+	STAGE("protocol: repl");
+	luaif_host_output_reset();
+	{
+		const char *line = "print('repl=' .. (6 * 7))";
+
+		reply_reset();
+		send_cmd(COMM_LISP_REPL_CMD, (const uint8_t *)line,
+				(unsigned int)strlen(line));
+		qrt_expect_ok("a repl line is evaluated",
+				strstr(luaif_host_output(), "repl=42") != NULL);
+	}
+
+	STAGE("protocol: repl error");
+	luaif_host_output_reset();
+	{
+		const char *bad = "this is not lua";
+
+		send_cmd(COMM_LISP_REPL_CMD, (const uint8_t *)bad,
+				(unsigned int)strlen(bad));
+		qrt_expect_ok("a bad repl line reports instead of dying",
+				strstr(luaif_host_output(), "repl") != NULL
+				|| strstr(luaif_host_output(), "syntax") != NULL
+				|| strstr(luaif_host_output(), "unexpected") != NULL);
+	}
+
+	STAGE("protocol: repl :info");
+	luaif_host_output_reset();
+	{
+		const char *info = ":info";
+
+		send_cmd(COMM_LISP_REPL_CMD, (const uint8_t *)info,
+				(unsigned int)strlen(info));
+		qrt_expect_ok(":info reports the arena",
+				strstr(luaif_host_output(), "Arena") != NULL);
+		qrt_expect_ok(":info reports the stack",
+				strstr(luaif_host_output(), "Stack") != NULL);
+	}
+
+	STAGE("protocol: stream_code");
+	luaif_host_output_reset();
+	{
+		const char *src = "print('streamed=1')\n";
+		int32_t tot = (int32_t)strlen(src);
+		uint8_t pay[160];
+		int32_t ind;
+		int32_t half = tot / 2;
+
+		/* first chunk, restart=0 so the running script is left alone */
+		ind = 0;
+		buffer_append_int32(pay, 0, &ind);
+		buffer_append_int32(pay, tot, &ind);
+		pay[ind++] = 0;
+		memcpy(pay + ind, src, (size_t)half);
+		reply_reset();
+		send_cmd(COMM_LISP_STREAM_CODE, pay, (unsigned int)(ind + half));
+
+		qrt_expect("stream reply length", m_reply_len, 7u);
+		qrt_expect("stream echoes the id",
+				m_reply[0], (unsigned)COMM_LISP_STREAM_CODE);
+		{
+			int32_t rind = 1;
+			int32_t off = buffer_get_int32(m_reply, &rind);
+			int16_t res = buffer_get_int16(m_reply, &rind);
+
+			qrt_expect("stream echoes the offset", (unsigned)off, 0u);
+			qrt_expect_ok("first chunk accepted", res == 0);
+		}
+
+		/* second chunk completes it, and the snippet runs */
+		ind = 0;
+		buffer_append_int32(pay, half, &ind);
+		buffer_append_int32(pay, tot, &ind);
+		pay[ind++] = 0;
+		memcpy(pay + ind, src + half, (size_t)(tot - half));
+		reply_reset();
+		send_cmd(COMM_LISP_STREAM_CODE, pay,
+				(unsigned int)(ind + (tot - half)));
+
+		qrt_expect_ok("the streamed snippet ran",
+				strstr(luaif_host_output(), "streamed=1") != NULL);
+	}
+
+	STAGE("protocol: stream_code out of order");
+	luaif_host_output_reset();
+	{
+		const char *src = "print('never-runs')\n";
+		int32_t tot = (int32_t)strlen(src);
+		uint8_t pay[160];
+		int32_t ind = 0;
+
+		/*
+		 * A chunk claiming to start past where the buffer actually is must be
+		 * refused. Accepting it would splice a hole into the source and then
+		 * run whatever that parsed as -- the stream is just bytes, so a gap
+		 * does not necessarily fail to compile.
+		 */
+		buffer_append_int32(pay, 0, &ind);
+		buffer_append_int32(pay, tot, &ind);
+		pay[ind++] = 0;
+		memcpy(pay + ind, src, 4);
+		reply_reset();
+		send_cmd(COMM_LISP_STREAM_CODE, pay, (unsigned int)(ind + 4));
+
+		ind = 0;
+		buffer_append_int32(pay, 99, &ind);      /* nowhere near 4 */
+		buffer_append_int32(pay, tot, &ind);
+		pay[ind++] = 0;
+		memcpy(pay + ind, src + 4, 4);
+		reply_reset();
+		send_cmd(COMM_LISP_STREAM_CODE, pay, (unsigned int)(ind + 4));
+		{
+			int32_t rind = 1;
+			int32_t off = buffer_get_int32(m_reply, &rind);
+			int16_t res = buffer_get_int16(m_reply, &rind);
+
+			qrt_expect("out-of-order chunk echoes its offset",
+					(unsigned)off, 99u);
+			qrt_expect_ok("out-of-order chunk is refused", res == -1);
+		}
+		qrt_expect_ok("nothing was run from a spliced stream",
+				strstr(luaif_host_output(), "never-runs") == NULL);
+	}
+
+	STAGE("protocol: rmsg is refused, not ignored");
+	luaif_host_output_reset();
+	{
+		uint8_t rm[2] = {0, 0};
+
+		send_cmd(COMM_LISP_RMSG, rm, sizeof(rm));
+		qrt_expect_ok("rmsg says it is unsupported",
+				strstr(luaif_host_output(), "not supported") != NULL);
+	}
+
+	STAGE("protocol: set_running off");
+	{
+		uint8_t off[1] = {0};
+
+		reply_reset();
+		send_cmd(COMM_LISP_SET_RUNNING, off, 1);
+		qrt_expect("stop replied", (unsigned)m_reply_count, 1u);
+		qrt_expect("stop reports success", m_reply[1], 1u);
+		qrt_expect("stop released the arena",
+				(unsigned)script_alloc_used(), 0u);
+	}
+
+}
 
 int main(void) {
 	qrt_console_init();
@@ -136,8 +487,6 @@ int main(void) {
 	qrt_systick_init();
 
 	qrt_puts("luaif test\r\n");
-
-#define STAGE(s) do { qrt_puts("  .. "); qrt_puts(s); qrt_puts("\r\n"); } while (0)
 
 	/* --- an empty code slot is a normal state, not a failure ----------- */
 	STAGE("empty slot");
@@ -290,6 +639,33 @@ int main(void) {
 				ms < 300u);
 		qrt_expect("looping handler released the arena",
 				(unsigned)script_alloc_used(), 0u);
+	}
+
+	/*
+	 * The protocol runs on a thread the size of the one that really calls it.
+	 *
+	 * commands_process_packet runs on comm_usb's serial_process_thread, whose
+	 * working area is 2048 bytes -- so that, not main's, is the stack
+	 * luaif_process_cmd has to fit in. Driving it from main here was both
+	 * unfaithful and too small: main's process stack is 0x800 and the checks
+	 * faulted intermittently with UFSR.INVPC, three runs in five.
+	 */
+	STAGE("protocol (on a 2048-byte thread)");
+	{
+		thread_t *pt = chThdCreateStatic(wa_proto, sizeof(wa_proto),
+				NORMALPRIO, proto_thread, NULL);
+		qrt_expect_ok("protocol thread created", pt != NULL);
+		chThdWait(pt);
+
+		unsigned used = qrt_stack_used(wa_proto, sizeof(wa_proto));
+		unsigned total = (unsigned)qrt_stack_total(sizeof(wa_proto));
+
+		qrt_puts("protocol_stack_used=");
+		qrt_putu(used);
+		qrt_puts(" of ");
+		qrt_putu(total);
+		qrt_puts("\r\n");
+		qrt_expect_ok("the protocol fits a comms-sized stack", used < total);
 	}
 
 	/* --- the thread is still alive and its stack is sane -------------- */

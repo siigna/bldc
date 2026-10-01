@@ -33,11 +33,16 @@
  * things that need a board are swapped out -- the flash the script is read
  * from, and the terminal its output goes to.
  */
+#include "datatypes.h"
+#include "buffer.h"
+
 #ifdef LUAIF_HOST_TEST
 #include "luaif_host.h"
 #else
 #include "commands.h"
 #include "flash_helper.h"
+#include "mempools.h"
+#include "utils.h"
 #endif
 
 /*
@@ -131,6 +136,27 @@ static volatile bool m_thd_started;
 static volatile bool m_in_script;
 
 static uint32_t m_timer_last_ms;
+
+/*
+ * A REPL line or a streamed snippet waiting to be evaluated on the engine
+ * thread.
+ *
+ * Not evaluated on the thread that received the packet, which is what
+ * script_event.h's note about SCRIPT_EV_REPL warns against and what this file
+ * did first: building and calling a chunk needs about 2 KB of stack before
+ * the script does anything, and the comms thread does not have it to spare.
+ * The symptom is not a clean overflow -- it is a HardFault with the PC set to
+ * the 0x55555555 stack fill pattern, several calls away from the cause.
+ *
+ * A dedicated slot rather than a queue entry: an expression is up to 512
+ * bytes against the queue's 64-byte payload, and sizing the payload for the
+ * REPL would cost that much in every queued CAN frame.
+ */
+#define LUA_EVAL_MAX		512
+static char m_eval[LUA_EVAL_MAX];
+static volatile int32_t m_eval_len;
+static volatile bool m_eval_pending;
+static volatile bool m_eval_ok;
 
 /* ------------------------------------------------------------------ output -- */
 
@@ -382,6 +408,24 @@ static THD_FUNCTION(lua_thread, arg) {
 			m_ack_done = seq;
 		}
 
+		if (m_eval_pending) {
+			char err[128];
+
+			chMtxLock(&m_mtx);
+			if (m_engine != NULL) {
+				m_eval_ok = script_lua_run(m_engine, m_eval, m_eval_len,
+						"repl", err, sizeof(err));
+				if (!m_eval_ok) {
+					commands_printf_lisp("%s", err);
+				}
+			} else {
+				m_eval_ok = false;
+			}
+			chMtxUnlock(&m_mtx);
+
+			m_eval_pending = false;
+		}
+
 		if (m_engine != NULL) {
 			chMtxLock(&m_mtx);
 			dispatch_pending();
@@ -532,6 +576,324 @@ void luaif_process_custom_app_data(unsigned char *data, unsigned int len) {
 	memcpy(ev.data, data, ev.len);
 
 	script_queue_post(&m_queue, &ev);
+}
+
+/*
+ * Bytes of the engine thread's stack that have been touched.
+ *
+ * chThdCreateStatic puts thread_t at the base of the working area and fills
+ * the stack above it with CH_DBG_STACK_FILL_VALUE, growing it downward from
+ * the top, so the run of surviving fill bytes is the headroom. LispBM reports
+ * zero for this field; there is no reason to, since the information is free.
+ */
+static float stack_use_percent(void) {
+#if CH_DBG_FILL_THREADS == TRUE
+	const unsigned char *base = (const unsigned char *)m_wa + sizeof(thread_t);
+	size_t total = sizeof(m_wa) - sizeof(thread_t);
+	size_t freebytes = 0;
+
+	while ((freebytes < total)
+			&& (base[freebytes] == CH_DBG_STACK_FILL_VALUE)) {
+		freebytes++;
+	}
+	return 100.0f * (float)(total - freebytes) / (float)total;
+#else
+	return 0.0f;
+#endif
+}
+
+/*
+ * Append the script's numeric globals as name/value pairs, which is what
+ * drives VESC Tool's variable plots.
+ *
+ * Only under chMtxTryLock. A script is entitled to spend a long time in a
+ * handler, and the engine thread holds the lock while it does; this runs on
+ * the comms thread, so waiting for it would hang the connection on a busy
+ * script. Failing to get the lock costs the caller the variable list for one
+ * poll, which is the right thing to lose.
+ */
+static void append_globals(uint8_t *buf, int32_t *ind, bool all) {
+	if (m_engine == NULL) {
+		return;
+	}
+	if (!chMtxTryLock(&m_mtx)) {
+		return;
+	}
+
+	lua_State *L = script_lua_state(m_engine);
+	if (L == NULL) {
+		chMtxUnlock(&m_mtx);
+		return;
+	}
+
+	lua_pushglobaltable(L);
+	lua_pushnil(L);
+	while (lua_next(L, -2) != 0) {
+		/* name must be a string and value a number, and there has to be room
+		 * for the longest pair this could append. */
+		if ((lua_type(L, -2) == LUA_TSTRING) && lua_isnumber(L, -1)
+				&& (*ind < 300)) {
+			const char *name = lua_tostring(L, -2);
+			size_t nlen = strlen(name);
+
+			if ((nlen > 0) && (nlen < 32)
+					&& (all || ((name[0] == 'v' || name[0] == 'V')
+							&& (name[1] == 't' || name[1] == 'T')))) {
+				memcpy(buf + *ind, name, nlen + 1);
+				*ind += (int32_t)nlen + 1;
+				buffer_append_float32_auto(buf,
+						(float)lua_tonumber(L, -1), ind);
+			}
+		}
+		lua_pop(L, 1);
+	}
+	lua_pop(L, 1);
+
+	chMtxUnlock(&m_mtx);
+}
+
+/*
+ * Source streamed in by the REPL's run-selection, which arrives in chunks and
+ * is run once the last one lands. Small on purpose: this is for a snippet, not
+ * a program -- a program goes through COMM_LISP_WRITE_CODE into flash, where
+ * it costs no RAM at all.
+ */
+#define LUA_STREAM_MAX		LUA_EVAL_MAX
+static char m_stream[LUA_STREAM_MAX];
+static int32_t m_stream_len;
+
+/*
+ * Hand a chunk to the engine thread and wait for it.
+ *
+ * Bounded like the other waits, and for the same reason: the caller is the
+ * comms thread. A REPL line that loops is stopped by the instruction hook via
+ * should_stop, so the deadline here is a backstop, not the mechanism.
+ */
+static bool eval_on_engine(const char *src, int32_t len, int timeout_ms) {
+	if ((m_thd == NULL) || (src == NULL) || (len <= 0)) {
+		return false;
+	}
+	if (len > LUA_EVAL_MAX) {
+		commands_printf_lisp("Expression too long (%d > %d bytes)",
+				(int)len, LUA_EVAL_MAX);
+		return false;
+	}
+	if (m_eval_pending) {
+		commands_printf_lisp("Busy with the previous expression");
+		return false;
+	}
+
+	memcpy(m_eval, src, (size_t)len);
+	m_eval_len = len;
+	m_eval_ok = false;
+	m_eval_pending = true;
+
+	for (int i = 0; (i < timeout_ms) && m_eval_pending; i++) {
+		chThdSleepMilliseconds(1);
+	}
+
+	if (m_eval_pending) {
+		// Give up waiting but leave the slot owned by the thread, which will
+		// finish and clear it; stealing it back would race the interpreter.
+		commands_printf_lisp("Expression did not finish in time");
+		return false;
+	}
+
+	return m_eval_ok;
+}
+
+void luaif_process_cmd(unsigned char *data, unsigned int len,
+		void (*reply_func)(unsigned char *data, unsigned int len)) {
+	if ((data == NULL) || (len < 1) || (reply_func == NULL)) {
+		return;
+	}
+
+	COMM_PACKET_ID packet_id = (COMM_PACKET_ID)data[0];
+	data++;
+	len--;
+
+	switch (packet_id) {
+	case COMM_LISP_SET_RUNNING: {
+		bool ok;
+
+		if ((len >= 1) && (data[0] == 0)) {
+			luaif_stop();
+			ok = true;			// stopping succeeded, not "a script runs"
+		} else {
+			ok = luaif_restart(true, true);
+		}
+
+		int32_t ind = 0;
+		uint8_t send_buffer[8];
+		send_buffer[ind++] = (uint8_t)packet_id;
+		send_buffer[ind++] = ok ? 1 : 0;
+		reply_func(send_buffer, (unsigned int)ind);
+	} break;
+
+	case COMM_LISP_GET_STATS: {
+		if (m_thd == NULL) {
+			break;
+		}
+
+		/*
+		 * CPU is the engine thread's share since the previous call, because
+		 * p_time is zeroed here -- so the first call after a reset covers
+		 * everything since boot, including building the interpreter. Reading
+		 * it as a steady-state figure is how a 6x regression gets reported
+		 * that was never there.
+		 */
+		static systime_t time_last;
+		float cpu_use = 0.0f;
+
+		utils_sys_lock_cnt();
+		systime_t now = chVTGetSystemTimeX();
+		systime_t span = now - time_last;
+		if (span > 0) {
+			cpu_use = 100.0f * (float)m_thd->p_time / (float)span;
+		}
+		time_last = now;
+		m_thd->p_time = 0;
+		utils_sys_unlock_cnt();
+
+		bool all = true;
+		if (len > 0) {
+			all = (data[0] != 0);
+		}
+
+		float mem_use = 100.0f * (float)script_alloc_used()
+				/ (float)sizeof(m_arena);
+
+		uint8_t *buf = mempools_get_packet_buffer();
+		int32_t ind = 0;
+
+		buf[ind++] = (uint8_t)packet_id;
+		buffer_append_float16(buf, cpu_use, 1e2, &ind);
+		// Heap and arena are the same thing here, unlike LispBM's split.
+		buffer_append_float16(buf, mem_use, 1e2, &ind);
+		buffer_append_float16(buf, mem_use, 1e2, &ind);
+		buffer_append_float16(buf, stack_use_percent(), 1e2, &ind);
+		buf[ind++] = '\0';			// result string, unused
+
+		append_globals(buf, &ind, all);
+
+		reply_func(buf, (unsigned int)ind);
+		mempools_free_packet_buffer(buf);
+	} break;
+
+	case COMM_LISP_REPL_CMD: {
+		/*
+		 * The engine has to exist to evaluate anything, but the script in
+		 * flash must not be re-run just because someone opened a REPL -- so
+		 * this starts an interpreter without loading code, matching lisp.
+		 */
+		if (m_engine == NULL) {
+			(void)luaif_restart(true, false);
+		}
+
+		if (m_engine == NULL) {
+			commands_printf_lisp("No interpreter");
+			break;
+		}
+
+		if (len < 1) {
+			commands_printf_lisp(">");
+			break;
+		}
+
+		// NUL-terminate in place: the packet is not guaranteed to be.
+		char line[256];
+		size_t n = (len < sizeof(line) - 1u) ? len : sizeof(line) - 1u;
+		memcpy(line, data, n);
+		line[n] = '\0';
+
+		if (strncmp(line, ":help", 5) == 0) {
+			commands_printf_lisp("== Special Commands ==");
+			commands_printf_lisp(":help\n  Print this help text");
+			commands_printf_lisp(":info\n  Print memory and stack usage");
+			commands_printf_lisp(":reset\n  Reload the script from flash");
+			commands_printf_lisp(":stop\n  Stop the script");
+			commands_printf_lisp(
+					"Anything else is evaluated as Lua. Use print() to see a"
+					" value; an expression's result is not echoed.");
+		} else if (strncmp(line, ":info", 5) == 0) {
+			commands_printf_lisp("Arena  %d of %d bytes, peak %d",
+					(int)script_alloc_used(), (int)sizeof(m_arena),
+					(int)script_alloc_peak());
+			commands_printf_lisp("Script %d bytes, peak %d",
+					(int)script_lua_mem_used(m_engine),
+					(int)script_lua_mem_peak(m_engine));
+			commands_printf_lisp("Stack  %d%% of %d bytes",
+					(int)stack_use_percent(),
+					(int)(sizeof(m_wa) - sizeof(thread_t)));
+			commands_printf_lisp("Restarts %d, events dropped %d",
+					m_restart_cnt, (int)script_queue_dropped(&m_queue));
+		} else if (strncmp(line, ":reset", 6) == 0) {
+			(void)luaif_restart(true, true);
+		} else if (strncmp(line, ":stop", 5) == 0) {
+			luaif_stop();
+			commands_printf_lisp("Stopped");
+		} else {
+			(void)eval_on_engine(line, (int32_t)n, 2000);
+		}
+	} break;
+
+	case COMM_LISP_STREAM_CODE: {
+		int32_t ind = 0;
+		int32_t offset = buffer_get_int32(data, &ind);
+		int32_t tot_len = buffer_get_int32(data, &ind);
+		int8_t restart = (int8_t)data[ind++];
+		int16_t result = 0;
+
+		if (offset == 0) {
+			m_stream_len = 0;
+			if ((m_engine == NULL) || (restart == 1) || (restart == 2)) {
+				(void)luaif_restart(true, restart == 2);
+			}
+		}
+
+		if ((m_engine == NULL) || (tot_len > LUA_STREAM_MAX)
+				|| (offset != m_stream_len)) {
+			// -1 is what lisp reports for "cannot take this", and VESC Tool
+			// already knows how to show it.
+			result = -1;
+			m_stream_len = 0;
+		} else {
+			int32_t chunk = (int32_t)len - ind;
+			if ((chunk > 0) && ((m_stream_len + chunk) <= LUA_STREAM_MAX)) {
+				memcpy(m_stream + m_stream_len, data + ind, (size_t)chunk);
+				m_stream_len += chunk;
+			}
+
+			if (m_stream_len >= tot_len) {
+				if (!eval_on_engine(m_stream, m_stream_len, 2000)) {
+					result = -1;
+				}
+				m_stream_len = 0;
+			}
+		}
+
+		int32_t send_ind = 0;
+		uint8_t send_buffer[16];
+		send_buffer[send_ind++] = (uint8_t)packet_id;
+		buffer_append_int32(send_buffer, offset, &send_ind);
+		buffer_append_int16(send_buffer, result, &send_ind);
+		// send_ind, not the read index: lispif passes `ind` here, which sends
+		// two bytes of whatever follows in its buffer.
+		reply_func(send_buffer, (unsigned int)send_ind);
+	} break;
+
+	case COMM_LISP_RMSG:
+		/*
+		 * Lisp-specific: it dispatches to a recv-rmsg channel, and there is
+		 * no Lua binding for one. Answered anyway -- a sender that gets
+		 * nothing back cannot tell a missing feature from a dead board.
+		 */
+		commands_printf_lisp("RMSG is not supported by the Lua engine");
+		break;
+
+	default:
+		break;
+	}
 }
 
 void luaif_process_shutdown(void) {

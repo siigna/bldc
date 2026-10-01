@@ -47,7 +47,7 @@ ifeq ($(TEST),test_luaif)
   CSRC += $(ENGINE_SRC) \
           $(TOP)/script/script_queue.c \
           $(TOP)/script/luaif.c \
-          $(TOP)/util/crc.c
+          $(TOP)/util/buffer.c
   INCDIR += $(TOP)/script $(TOP)/script/lua $(TOP)/util
   TESTDEFS += -DLUAIF_HOST_TEST
 endif
