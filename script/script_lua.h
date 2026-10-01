@@ -74,6 +74,25 @@ typedef struct {
 	 * which case require() finds nothing and says so.
 	 */
 	const script_blob_t *blob;
+
+	/*
+	 * Backing allocator, in Lua's own realloc shape, with alloc_ud passed
+	 * through as its first argument. NULL means the C library's realloc,
+	 * which is what a host test and any part with a general-purpose malloc
+	 * should use.
+	 *
+	 * A target whose interpreter must live somewhere specific passes its own
+	 * here instead: on an F405 there is no room for a Lua heap in main RAM,
+	 * so bldc passes script_alloc and serves the interpreter out of a fixed
+	 * arena in CCM.
+	 *
+	 * The ceiling in mem_limit is enforced above this, so it still applies
+	 * whatever the allocator is -- and a backing allocator may also have a
+	 * hard limit of its own, which a script reaches only if mem_limit is
+	 * higher or zero.
+	 */
+	void *(*alloc)(void *ud, void *ptr, size_t osize, size_t nsize);
+	void *alloc_ud;
 } script_lua_cfg_t;
 
 typedef struct script_lua script_lua_t;
@@ -92,6 +111,8 @@ void script_lua_close(script_lua_t *s);
  * copies the message into err, which may be NULL. Errors never propagate out
  * of this call: everything runs under lua_pcall, because a longjmp escaping
  * into firmware that is driving hardware is not recoverable.
+ *
+ * A negative len means src is NUL-terminated.
  */
 bool script_lua_run(script_lua_t *s, const char *src, int32_t len,
 		const char *chunkname, char *err, size_t err_len);

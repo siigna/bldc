@@ -70,8 +70,14 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
 	script_lua_t *s = (script_lua_t *)ud;
 
 	if (nsize == 0) {
-		free(ptr);
-		s->mem_used -= osize;
+		if (s->cfg.alloc) {
+			s->cfg.alloc(s->cfg.alloc_ud, ptr, osize, 0);
+		} else {
+			free(ptr);
+		}
+		// Clamped rather than wrapped: an underflowed total would read as
+		// enormous and wedge the ceiling shut for the rest of the run.
+		s->mem_used = (s->mem_used >= osize) ? (s->mem_used - osize) : 0;
 		return NULL;
 	}
 
@@ -85,7 +91,9 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
 		}
 	}
 
-	void *np = realloc(ptr, nsize);
+	void *np = s->cfg.alloc
+			? s->cfg.alloc(s->cfg.alloc_ud, ptr, osize, nsize)
+			: realloc(ptr, nsize);
 	if (!np) {
 		return NULL;
 	}
@@ -398,7 +406,16 @@ bool script_lua_run(script_lua_t *s, const char *src, int32_t len,
 		return false;
 	}
 
-	if (luaL_loadbuffer(s->L, src, (size_t)len,
+	/*
+	 * A negative length means NUL-terminated. Without this a caller passing
+	 * -1 -- the usual convention, and what Lua's own API accepts -- casts to
+	 * SIZE_MAX and the parser reads off the end of the buffer. That is a
+	 * fault on a board and silent corruption on a host, from a mistake the
+	 * signature invites.
+	 */
+	size_t srclen = (len < 0) ? strlen(src) : (size_t)len;
+
+	if (luaL_loadbuffer(s->L, src, srclen,
 			chunkname ? chunkname : "=script") != LUA_OK) {
 		const char *msg = lua_tostring(s->L, -1);
 		if (err && err_len > 0 && msg) {
