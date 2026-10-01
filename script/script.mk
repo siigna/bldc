@@ -18,7 +18,8 @@ LUASRC = $(wildcard script/lua/*.c) \
          script/script_lua.c \
          script/script_queue.c \
          script/script_alloc.c \
-         script/luaif.c
+         script/luaif.c \
+         script/lua_vesc_mc.c
 
 LUAINC = script script/lua
 

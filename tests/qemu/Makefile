@@ -40,6 +40,18 @@ ifeq ($(TEST),test_engine)
   INCDIR += $(TOP)/script $(TOP)/script/lua
 endif
 
+# test_bindings compiles script/lua_vesc_mc.c against the fakes in fake/,
+# which sit earlier on the include path than the real mc_interface.h and
+# timeout.h. The bindings therefore have no test seam of their own.
+ifeq ($(TEST),test_bindings)
+  CSRC += $(ENGINE_SRC) \
+          $(TOP)/script/lua_vesc_mc.c \
+          fake/fake_mc.c
+  # fake/ must come FIRST: $(TOP) also has a real timeout.h, and whichever
+  # directory is earlier on the path wins.
+  INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua
+endif
+
 # test_luaif adds the firmware adapter and the queue it drains. LUAIF_HOST_TEST
 # swaps only flash_helper and the terminal for the stubs in luaif_host.h; the
 # kernel, the engine, the arena and the queue are all the real thing.
@@ -47,8 +59,12 @@ ifeq ($(TEST),test_luaif)
   CSRC += $(ENGINE_SRC) \
           $(TOP)/script/script_queue.c \
           $(TOP)/script/luaif.c \
-          $(TOP)/util/buffer.c
-  INCDIR += $(TOP)/script $(TOP)/script/lua $(TOP)/util
+          $(TOP)/script/lua_vesc_mc.c \
+          $(TOP)/util/buffer.c \
+          fake/fake_mc.c
+  # fake/ first, as above: luaif.c registers the motor bindings, so this test
+  # pulls in lua_vesc_mc.c and therefore needs the fake mc_interface too.
+  INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua $(TOP)/util
   TESTDEFS += -DLUAIF_HOST_TEST
 endif
 

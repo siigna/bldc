@@ -15,6 +15,8 @@
 #include "luaif.h"
 #include "luaif_host.h"
 #include "script_alloc.h"
+#include "mc_interface.h"
+#include "timeout.h"
 #include "script_pack.h"
 #include "datatypes.h"
 #include "buffer.h"
@@ -639,6 +641,79 @@ int main(void) {
 				ms < 300u);
 		qrt_expect("looping handler released the arena",
 				(unsigned)script_alloc_used(), 0u);
+	}
+
+	/*
+	 * --- the whole chain, from a CAN frame to the motor ----------------
+	 *
+	 * The point of the adapter is that a frame arriving on one thread ends up
+	 * driving the motor from another, through a script. Everything up to here
+	 * has tested a link at a time; this is the chain.
+	 */
+	STAGE("can frame drives the motor");
+	luaif_host_output_reset();
+	/*
+	 * data is a Lua string, not a table -- script_lua_dispatch pushes the
+	 * frame with lua_pushlstring -- so bytes come out with string.byte and
+	 * data[1] is nil. Worth having a test that depends on it.
+	 */
+	flash_write_script(
+			"vesc.on_can(function(id, data)\n"
+			"  if id == 0x200 then\n"
+			"    vesc.set_current_rel(data:byte(1) / 100.0)\n"
+			"  end\n"
+			"end)\n", true);
+	qrt_expect_ok("restart with a motor-driving handler",
+			luaif_restart(true, true));
+	{
+		uint8_t frame[1] = {50};
+
+		fake_mc.set_current_rel = 0.0f;
+		fake_timeout_resets = 0;
+
+		luaif_process_can(0x200u, frame, sizeof(frame), false);
+		chThdSleepMilliseconds(50);
+
+		qrt_expect_ok("the frame reached the motor as a relative current",
+				(fake_mc.set_current_rel > 0.49f)
+				&& (fake_mc.set_current_rel < 0.51f));
+		/* the binding's timeout refresh has to survive the trip too */
+		qrt_expect_ok("driving the motor refreshed the timeout",
+				fake_timeout_resets >= 1);
+	}
+
+	/*
+	 * And a frame the script filters out must leave the motor alone. Without
+	 * this the check above passes for a handler that ignores its arguments
+	 * and drives the motor unconditionally.
+	 */
+	{
+		uint8_t frame[1] = {99};
+
+		fake_mc.set_current_rel = 0.0f;
+		luaif_process_can(0x201u, frame, sizeof(frame), false);
+		chThdSleepMilliseconds(50);
+		qrt_expect_ok("a frame the script ignores does not drive the motor",
+				fake_mc.set_current_rel == 0.0f);
+	}
+
+	/*
+	 * --- stopping the script stops the motor ---------------------------
+	 *
+	 * luaif_stop releases the interpreter but says nothing about the motor,
+	 * which keeps whatever it was last told until the timeout expires. That
+	 * is the firmware's safety net doing its job rather than the adapter's,
+	 * and it is worth recording which one is responsible: nothing here
+	 * commands zero on stop.
+	 */
+	STAGE("stop leaves the motor to the timeout");
+	{
+		fake_mc.set_current_rel = 0.0f;
+		fake_mc.released = 0;
+
+		luaif_stop();
+		qrt_expect("stopping the script does not itself release the motor",
+				(unsigned)fake_mc.released, 0u);
 	}
 
 	/*

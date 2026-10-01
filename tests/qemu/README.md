@@ -23,6 +23,45 @@ Sizing the engine thread's working area is otherwise a bench job, and `.ram4`
 has very little slack. The figure is exact: a 400-byte local in the thread
 moves it by exactly 400.
 
+## The motor bindings
+
+`test_bindings` compiles `script/lua_vesc_mc.c` against a fake `mc_interface`
+in `fake/`, which sits **earlier on the include path** than the real headers.
+The bindings therefore carry no test seam of their own -- the production file
+is compiled unmodified.
+
+`fake/` must come first in `INCDIR`, before `$(TOP)`, which also has a real
+`timeout.h`. And `mc_fault_code` comes from the firmware's own `datatypes.h`
+rather than a copy, so the codes a test asserts on cannot drift from the ones
+the firmware reports.
+
+The property worth the effort is that **every setter refreshes the motor
+timeout**. A setter that forgets works perfectly until the first gap longer
+than the timeout, and then the output drops out with nothing to show why. The
+setters are therefore driven from a list, so adding one without adding it to
+the list is the only way to miss it.
+
+Two mutations needed the test sharpened rather than the code:
+
+- Reading an absent argument with `lua_tonumber` yields 0, and
+  `mc_interface_set_current_off_delay(0)` is **not** the same as not calling
+  it -- zero clears a delay set earlier. Asserting the recorded value was
+  still 0 could not tell those apart. The fake now counts the calls.
+- Name parity with lisp was claimed, not checked. Comparing the two name
+  lists mechanically found that lisp calls the motor temperature
+  `get-temp-mot`, not `get-temp-motor`, and binds no tachometer getter at
+  all. A name *nearly* the same as the other engine's is worse than one that
+  is identical or obviously different, so the binding was renamed and the two
+  additions documented.
+
+`test_luaif` then drives the whole chain: a CAN frame arriving on one thread
+ending up as motor current from another, through a script -- plus the case
+where the script filters the frame out, without which the first check passes
+for a handler that ignores its arguments. One thing it records rather than
+asserts: stopping a script does **not** command the motor to zero. It keeps
+what it was last told until the firmware's timeout expires. That is the
+timeout's job, not the adapter's, and it is worth knowing which.
+
 ## What it found in the protocol handler
 
 `test_luaif` also drives the `COMM_LISP_*` packets the way `commands.c` does.
