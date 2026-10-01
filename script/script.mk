@@ -21,6 +21,36 @@ LUASRC = $(wildcard script/lua/*.c) \
 
 LUAINC = script script/lua
 
+# Lua's limit on nested C calls, lowered from its default of 200.
+#
+# This is the guard that is supposed to stop runaway recursion before it
+# overflows the C stack, and at 200 it cannot do its job on this part.
+# Measured on the simulated F405 in tests/qemu, each nested pcall level costs
+# 464 bytes of thread stack over a 2,088-byte baseline, so the default limit
+# wants
+#
+#   2088 + 200 * 464 = 94,888 bytes
+#
+# of stack for one thread. All of CCM is 65,536. The hardware stack therefore
+# dies long before Lua's own check fires, and the measured difference is
+# stark: at the default a 40-deep pcall chain takes a HardFault with
+# BFSR.STKERR, and with the limit lowered the same script gets a catchable
+# "C stack overflow" error and the firmware carries on.
+#
+# Pick a value for the engine thread's working area with
+#
+#   LUAI_MAXCCALLS = (usable_stack - 2088) / 464
+#
+# less some margin, where usable_stack is the working area minus
+# sizeof(thread_t). 16 suits a 12 KB working area: 2088 + 16 * 464 = 9,512,
+# leaving about 2.8 KB spare. Raising the working area is what buys a higher
+# limit; there is no free way to get one.
+#
+# llimits.h guards the default with #if !defined, so defining it here is the
+# documented way in. (LUA_32BITS is different -- Lua defines that one itself
+# and it has to go in luaconf.h.)
+LUAOPT = -DLUAI_MAXCCALLS=16
+
 # Nothing references the engine yet, and ChibiOS links with
 # -ffunction-sections --gc-sections, so a USE_LUA=1 build is the same size as
 # one without it: every Lua function is discarded. That is why the cost was

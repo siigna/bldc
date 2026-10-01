@@ -131,7 +131,7 @@ ifeq ($(USE_LUA),1)
       exclusive in one build, and on an F405 there is only room for one)
   endif
   include script/script.mk
-  USE_OPT += -DUSE_LUA
+  USE_OPT += -DUSE_LUA $(LUAOPT)
 endif
 
 # Define linker script file here

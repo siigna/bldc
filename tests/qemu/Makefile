@@ -1,0 +1,104 @@
+# Builds a ChibiOS test image for qemu-system-arm -M olimex-stm32-h405, which
+# models an STM32F405 -- the part the firmware actually targets.
+#
+# Kernel only: no HAL, no STM32 LLD. The clock tree is whatever QEMU provides
+# and SysTick is a Cortex-M core peripheral, so none of the board's peripheral
+# init has to be simulated for the kernel to run.
+#
+#   nix-shell -p gcc-arm-embedded gnumake qemu --run 'make run'
+#   nix-shell -p gcc-arm-embedded gnumake qemu --run './run.sh'
+
+TEST   ?= test_kernel
+
+TOP     = ../..
+CHIBIOS = $(TOP)/ChibiOS_3.0.5
+
+include $(CHIBIOS)/os/rt/rt.mk
+include $(CHIBIOS)/os/rt/ports/ARMCMx/compilers/GCC/mk/port_v7m.mk
+include $(CHIBIOS)/os/common/ports/ARMCMx/compilers/GCC/mk/startup_stm32f4xx.mk
+
+CSRC   = $(KERNSRC) $(PORTSRC) $(STARTUPSRC) qrt.c $(TEST).c
+
+ASMSRC = $(STARTUPASM) $(PORTASM)
+
+# $(TOP) is on the include path for bldc's own chconf.h, so the kernel here is
+# configured exactly as it is in firmware -- same tick rate, same debug options.
+INCDIR := . $(TOP) $(KERNINC) $(PORTINC) $(STARTUPINC) \
+          $(CHIBIOS)/os/hal/osal/rt $(CHIBIOS)/os/hal/include
+
+# test_engine links the real engine: the vendored Lua core, the container
+# parser, and the CCM arena allocator. syscalls.c is what make/fw.mk gives the
+# firmware for newlib's _sbrk, so malloc behaves here as it does on the board.
+ifeq ($(TEST),test_engine)
+  CSRC += $(wildcard $(TOP)/script/lua/*.c) \
+          $(TOP)/script/script_pack.c \
+          $(TOP)/script/script_lua.c \
+          $(TOP)/script/script_alloc.c \
+          $(CHIBIOS)/os/various/syscalls.c
+  INCDIR += $(TOP)/script $(TOP)/script/lua
+endif
+
+
+LDSCRIPT = $(CHIBIOS)/os/common/ports/ARMCMx/compilers/GCC/ld/STM32F405xG.ld
+
+# -DSTM32F405xx is what lets cmparams.h skip including a board.h.
+# USE_FPU=hard and these two stack sizes are what make/fw.mk uses.
+ARCH   = -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16
+DEFS   = -DCORTEX_USE_FPU=TRUE -DSTM32F405xx \
+         -DTHUMB_PRESENT -DTHUMB_NO_INTERWORKING
+
+CFLAGS = $(ARCH) $(DEFS) -O2 -g -std=gnu99 -ffreestanding \
+         -fomit-frame-pointer -falign-functions=16 \
+         -ffunction-sections -fdata-sections -fsingle-precision-constant \
+         -Wall -Wextra $(CFLAGS_EXTRA) $(patsubst %,-I%,$(INCDIR))
+
+# ChibiOS's .s files are macro-heavy and lowercase .s is not preprocessed
+# unless asked, so assembly needs its own rule rather than riding on CFLAGS.
+AFLAGS = $(ARCH) $(DEFS) -g -x assembler-with-cpp $(patsubst %,-I%,$(INCDIR))
+
+# -specs=nosys.specs is what make/fw.mk uses to satisfy newlib's syscall
+# stubs; ChibiOS's syscalls.c supplies _sbrk_r over __heap_base__ beside it.
+LDFLAGS = $(ARCH) -nostartfiles -specs=nosys.specs -T$(LDSCRIPT) \
+          -L$(STARTUPLD) \
+          -L$(CHIBIOS)/os/common/ports/ARMCMx/compilers/GCC \
+          -Wl,--defsym=__process_stack_size__=0x800 \
+          -Wl,--defsym=__main_stack_size__=0x800 \
+          -Wl,--gc-sections,--no-warn-rwx-segments,-Map=$(TEST).map
+
+# Object directory keyed on the extra flags. Without this, changing
+# CFLAGS_EXTRA between builds silently reuses objects compiled with the old
+# value -- a sweep over a -D parameter then reports the first build's number
+# for every point in the sweep, which looks like a flat result rather than a
+# broken one.
+FLAGKEY := $(shell printf '%s' "$(CFLAGS_EXTRA)" | cksum | cut -d' ' -f1)
+OBJDIR  = obj/$(TEST)-$(FLAGKEY)
+OBJ    = $(addprefix $(OBJDIR)/,$(notdir $(CSRC:.c=.o)) $(notdir $(ASMSRC:.s=.o)))
+VPATH  = $(sort $(dir $(CSRC) $(ASMSRC)))
+
+QEMU     ?= qemu-system-arm
+QEMUFLAGS = -M olimex-stm32-h405 -cpu cortex-m4 -nographic \
+            -semihosting --semihosting-config enable=on,target=native \
+            -serial mon:stdio
+
+all: $(TEST).elf
+
+$(OBJDIR):
+	@mkdir -p $(OBJDIR)
+
+$(OBJDIR)/%.o: %.c | $(OBJDIR)
+	@arm-none-eabi-gcc $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/%.o: %.s | $(OBJDIR)
+	@arm-none-eabi-gcc $(AFLAGS) -c -o $@ $<
+
+$(TEST).elf: $(OBJ)
+	@arm-none-eabi-gcc $(LDFLAGS) -o $@ $(OBJ) -lm
+	@arm-none-eabi-size $@
+
+run: $(TEST).elf
+	@timeout 60 $(QEMU) $(QEMUFLAGS) -kernel $(TEST).elf
+
+clean:
+	rm -rf obj *.elf *.map
+
+.PHONY: all run clean
