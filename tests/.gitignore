@@ -1,0 +1,9 @@
+# Host test binaries and their objects. The plain-C suites build in place, so
+# without this a `git add` from the tests directory picks them up -- which is
+# how three of them got committed.
+test
+*.o
+*.d
+*.gcov
+*.gcda
+*.gcno
