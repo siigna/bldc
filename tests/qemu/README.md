@@ -107,6 +107,36 @@ and `nm` on the image shows exactly five `luaopen_*` symbols. The
 libc internals in code that is then discarded — `ld` even says the message
 does not account for garbage collection. Measured before doing the work.
 
+## What the input bindings could *not* be tested with here
+
+`script/lua_vesc_io.c` is **not linked into any of these images**, and that is
+a limitation rather than an oversight. It includes `conf_general.h` for
+`ADC_VOLTS`, which pulls in a board header and from there the whole ChibiOS
+HAL — `hal_lld.h`, then `pal_lld.h`, then one per driver. This harness is
+kernel-only by design, so pulling the HAL in to compile one file would change
+its premise and put the other five images at risk. `test_luaif` registers an
+empty table in its place (`fake/fake_io.c`), so the input bindings get no
+coverage at all from the QEMU suite.
+
+What does cover the one part with logic in it is `tests/lua_adc`, a plain-C
+host test that **cuts `adc_index()` out of the real source** with `sed` rather
+than copying it. The extraction is guarded: if the function signature changes,
+the build fails with a message saying so instead of testing an empty file,
+which was verified by renaming the function.
+
+The trap it exists for: `hwconf/hw.h` aliases `ADC_IND_EXT2` through
+`ADC_IND_EXT8` to `ADC_IND_EXT` when a board does not define them, so on a
+board with two external pins `get_adc(4)` returns the voltage on channel 0 —
+usually the throttle. A script reading a sensor it believes is on EXT4 gets a
+plausible, moving, completely wrong number. **lisp does exactly that**; the
+Lua binding returns nil instead. 33 checks over two simulated boards, three
+logic mutations caught.
+
+The rest of `lua_vesc_io.c` is one-line wrappers around app and driver calls.
+Those are untested, and the `get_ppm` on-demand decoder start — which stops
+the servo output, since the two share a timer — is the part most worth a bench
+check.
+
 ## The CAN bindings, and two decisions worth pinning
 
 27 bindings: 14 readers over the status cache, `can_msg_age`, three discovery

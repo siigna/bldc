@@ -21,7 +21,8 @@ LUASRC = $(wildcard script/lua/*.c) \
          script/luaif.c \
          script/lua_vesc_mc.c \
          script/lua_vesc_conf.c \
-         script/lua_vesc_can.c
+         script/lua_vesc_can.c \
+         script/lua_vesc_io.c
 
 LUAINC = script script/lua
 

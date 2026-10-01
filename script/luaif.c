@@ -25,6 +25,7 @@
 #include "lua_vesc_mc.h"
 #include "lua_vesc_conf.h"
 #include "lua_vesc_can.h"
+#include "lua_vesc_io.h"
 
 #include <string.h>
 
@@ -287,6 +288,7 @@ static bool engine_open_and_run(bool print) {
 	script_lua_register(m_engine, lua_vesc_mc_fns());
 	script_lua_register(m_engine, lua_vesc_conf_fns());
 	script_lua_register(m_engine, lua_vesc_can_fns());
+	script_lua_register(m_engine, lua_vesc_io_fns());
 
 	char err[128];
 	m_in_script = true;

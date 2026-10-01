@@ -44,7 +44,10 @@ ENGINE_SRC = $(wildcard $(TOP)/script/lua/*.c) \
 BINDING_SRC = $(TOP)/script/lua_vesc_mc.c \
               $(TOP)/script/lua_vesc_conf.c \
               $(TOP)/script/lua_vesc_can.c
-BINDING_FAKES = fake/fake_mc.c fake/fake_conf.c fake/fake_can.c
+# fake_io.c stands in for lua_vesc_io.c, which cannot be linked here: it
+# reaches the ChibiOS HAL through conf_general.h and these images have no HAL.
+# See the note in fake_io.c, and tests/lua_adc for what does cover it.
+BINDING_FAKES = fake/fake_mc.c fake/fake_conf.c fake/fake_can.c fake/fake_io.c
 BINDING_INC = $(TOP)/script $(TOP)/script/lua $(TOP)/util
 
 ifeq ($(TEST),test_engine)
