@@ -78,13 +78,45 @@ ifeq ($(TEST),test_conf)
   INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua
 endif
 
+# demo_lisp is the LispBM counterpart to demo. LispBM ships its own ChibiOS
+# platform layer, so its core links into this kernel-only image the same way
+# the Lua core does -- no HAL, no flash driver.
+ifeq ($(TEST),demo_lisp)
+  # No -ffreestanding here. It makes newlib's inttypes.h withhold PRIu64 and
+  # PRId64, which lispBM/src/print.c uses -- the firmware does not pass it
+  # either, so this matches how LispBM is really built.
+  FREESTANDING :=
+  # The same LBM_USE_* set make/fw.mk passes, so this is the engine the
+  # firmware builds rather than a differently-configured one.
+  TESTDEFS += -DLBM_USE_DYN_FUNS -DLBM_USE_DYN_MACROS -DLBM_USE_DYN_LOOPS \
+              -DLBM_USE_TIME_QUOTA -DLBM_USE_ERROR_LINENO \
+              -DLBM_USE_MACRO_REST_ARGS
+  LISPBM = $(TOP)/lispBM/lispBM
+  # The extension list the firmware builds, not a glob: crypto_extensions.c
+  # wants an external crypto.h the firmware does not provide either.
+  CSRC += $(wildcard $(LISPBM)/src/*.c) \
+          $(LISPBM)/src/extensions/array_extensions.c \
+          $(LISPBM)/src/extensions/lbm_dyn_lib.c \
+          $(LISPBM)/src/extensions/math_extensions.c \
+          $(LISPBM)/src/extensions/mutex_extensions.c \
+          $(LISPBM)/src/extensions/string_extensions.c \
+          $(LISPBM)/platform/chibios/src/platform_mutex.c \
+          $(LISPBM)/platform/chibios/src/platform_timestamp.c \
+          $(CHIBIOS)/os/various/syscalls.c
+  # fake/ supplies a hal.h that is only an include of ch.h; see the note in it.
+  INCDIR := fake $(INCDIR) $(TOP)/lispBM $(LISPBM)/include \
+            $(LISPBM)/include/extensions $(LISPBM)/platform/chibios/include
+endif
+
 # demo is not a test: it prints a console session for showing what the engine
 # does. Same sources as test_script.
 ifeq ($(TEST),demo)
   CSRC += $(ENGINE_SRC) \
           $(TOP)/script/lua_vesc_mc.c \
+          $(TOP)/script/lua_vesc_conf.c \
           fake/fake_mc.c \
-          fake/fake_io.c
+          fake/fake_io.c \
+          fake/fake_conf.c
   INCDIR := fake $(INCDIR) $(BINDING_INC) .
 endif
 
@@ -138,6 +170,7 @@ LDSCRIPT = $(CHIBIOS)/os/common/ports/ARMCMx/compilers/GCC/ld/STM32F405xG.ld
 
 # -DSTM32F405xx is what lets cmparams.h skip including a board.h.
 # USE_FPU=hard and these two stack sizes are what make/fw.mk uses.
+FREESTANDING ?= -ffreestanding
 ARCH   = -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16
 DEFS   = -DCORTEX_USE_FPU=TRUE -DSTM32F405xx \
          -DTHUMB_PRESENT -DTHUMB_NO_INTERWORKING
@@ -147,7 +180,7 @@ DEFS   = -DCORTEX_USE_FPU=TRUE -DSTM32F405xx \
 # changed once and only half the objects picked it up, so two translation units
 # disagreed about a field's offset and the test failed with values that looked
 # like a logic bug.
-CFLAGS = $(ARCH) $(DEFS) -O2 -g -std=gnu99 -ffreestanding -MMD -MP \
+CFLAGS = $(ARCH) $(DEFS) -O2 -g -std=gnu99 $(FREESTANDING) -MMD -MP \
          -fomit-frame-pointer -falign-functions=16 \
          -ffunction-sections -fdata-sections -fsingle-precision-constant \
          -Wall -Wextra $(TESTDEFS) $(CFLAGS_EXTRA) $(patsubst %,-I%,$(INCDIR))

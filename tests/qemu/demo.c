@@ -15,6 +15,7 @@
 #include "script_alloc.h"
 #include "lua_vesc_mc.h"
 #include "lua_vesc_io.h"
+#include "lua_vesc_conf.h"
 #include "fake_io.h"
 
 #include "mc_interface.h"
@@ -117,10 +118,13 @@ static THD_FUNCTION(engine, arg) {
 	}
 	script_lua_register(m_s, lua_vesc_mc_fns());
 	script_lua_register(m_s, lua_vesc_io_fns());
+	script_lua_register(m_s, lua_vesc_conf_fns());
 
 	say("  [  OK  ] interpreter heap: 40 KB arena, 32 KB script ceiling");
 	say("  [  OK  ] engine thread at NORMALPRIO-1, 12 KB stack in CCM");
-	say("  [  OK  ] bindings: motor, config, CAN, inputs");
+	qrt_puts("  [  OK  ] bindings: motor, inputs, and ");
+	qrt_putu((unsigned)number("#vesc.conf_names()"));
+	say(" configuration parameters");
 	say("");
 
 	fake_io_reset();
@@ -154,6 +158,13 @@ static THD_FUNCTION(engine, arg) {
 	milli("    ", number("vesc.get_vin()"), " V\r\n");
 	say("  > M.cfg.max_current");
 	milli("    ", number("M.cfg.max_current"), " A\r\n");
+	/* a PAS parameter: reachable from Lua only because the two branches met,
+	 * and the parameter table is derived from the lisp chains rather than
+	 * retyped -- these arrived without a line of binding code */
+	run("vesc.conf_set('pas_power_max_w', 250)");
+	say("  > vesc.conf_set('pas_power_max_w', 250)");
+	say("  > vesc.conf_get('pas_power_max_w')");
+	milli("    ", number("vesc.conf_get('pas_power_max_w')"), " W\r\n");
 	say("");
 
 	/* --- the throttle, stepped ------------------------------------- */
