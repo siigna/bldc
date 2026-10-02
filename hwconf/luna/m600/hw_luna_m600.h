@@ -39,6 +39,9 @@
 #define HW_HAS_GATE_DRIVER_SUPPLY_MONITOR
 #define HW_HAS_WHEEL_SPEED_SENSOR
 #define HW_HAS_PAS_TORQUE_SENSOR
+// The torque source is configurable and defaults to none, so this board
+// selects its own implementation to keep behaving as it did.
+#define APPCONF_PAS_TORQUE_SOURCE		PAS_TORQUE_SRC_HW
 #define HW_HAS_LUNA_CANBUS_DISPLAY
 #define HW_USE_BRK
 

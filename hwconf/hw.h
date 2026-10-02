@@ -236,6 +236,25 @@
 #define CURR3_DOUBLE_SAMPLE		0
 #endif
 
+// Reading back the aux outputs. Derived from the same pins the ON and OFF
+// macros use, which covers every board that drives aux as a plain GPIO. A board
+// that drives it some other way, or has no aux at all, reads as off.
+#ifndef AUX_READ
+#ifdef AUX_GPIO
+#define AUX_READ()				(palReadPad(AUX_GPIO, AUX_PIN) ? 1 : 0)
+#else
+#define AUX_READ()				0
+#endif
+#endif
+
+#ifndef AUX2_READ
+#ifdef AUX2_GPIO
+#define AUX2_READ()				(palReadPad(AUX2_GPIO, AUX2_PIN) ? 1 : 0)
+#else
+#define AUX2_READ()				0
+#endif
+#endif
+
 #ifndef AUX_ON
 #define AUX_ON()
 #endif
@@ -657,11 +676,16 @@
 #endif
 #endif
 
+// Hardware without dedicated pedal sensor pins falls back to the COMM UART
+// pads. Those pads are shared with UART communication, which includes the link
+// to a VESC Express module, so HW_PAS_PINS_SHARED_WITH_UART marks the fallback
+// and the PAS app only claims the pads when UART comms is not in use.
 #ifndef HW_PAS1_PORT
 #define HW_PAS1_PORT			HW_UART_RX_PORT
 #define HW_PAS1_PIN				HW_UART_RX_PIN
 #define HW_PAS2_PORT			HW_UART_TX_PORT
 #define HW_PAS2_PIN				HW_UART_TX_PIN
+#define HW_PAS_PINS_SHARED_WITH_UART
 #endif
 
 #ifndef HW_ICU_TIMER

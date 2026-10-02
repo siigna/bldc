@@ -686,13 +686,67 @@ typedef enum {
 	PAS_CTRL_TYPE_NONE = 0,
 	PAS_CTRL_TYPE_CADENCE,
 	PAS_CTRL_TYPE_TORQUE,
-	PAS_CTRL_TYPE_TORQUE_WITH_CADENCE_TIMEOUT
+	PAS_CTRL_TYPE_TORQUE_WITH_CADENCE_TIMEOUT,
+	PAS_CTRL_TYPE_POWER
 } pas_control_type;
 
-// PAS sensor types
+// PAS cadence sensor types
 typedef enum {
-	PAS_SENSOR_TYPE_QUADRATURE = 0
+	PAS_SENSOR_TYPE_QUADRATURE = 0,
+	PAS_SENSOR_TYPE_SINGLE_WIRE
 } pas_sensor_type;
+
+// Where the PAS torque reading comes from
+typedef enum {
+	PAS_TORQUE_SRC_NONE = 0,
+	PAS_TORQUE_SRC_HW,
+	PAS_TORQUE_SRC_ADC
+} pas_torque_source;
+
+// Which ADC channel a PAS analog input is on
+typedef enum {
+	PAS_TORQUE_ADC_EXT1 = 0,
+	PAS_TORQUE_ADC_EXT2,
+	PAS_TORQUE_ADC_EXT3,
+	PAS_TORQUE_ADC_EXT4,
+	PAS_TORQUE_ADC_EXT5,
+	PAS_TORQUE_ADC_EXT6,
+	PAS_TORQUE_ADC_EXT7,
+	PAS_TORQUE_ADC_EXT8
+} pas_adc_ch;
+
+// How a PAS power request is turned into a current
+typedef enum {
+	// Compute the current from the request and the input voltage, and let the
+	// current limits bound it
+	PAS_POWER_OPEN_LOOP = 0,
+	// As above, then trim it against measured input power
+	PAS_POWER_CLOSED_LOOP
+} pas_power_ctrl_mode;
+
+// Where the PAS walk assist trigger comes from
+typedef enum {
+	PAS_WALK_SRC_NONE = 0,
+	// Held by a script, which must keep refreshing it
+	PAS_WALK_SRC_LISP,
+	PAS_WALK_SRC_ADC
+} pas_walk_source;
+
+// How PAS output combines with a throttle, when both apps run
+typedef enum {
+	// Use whichever is asking for more, which is what this firmware has
+	// always done
+	PAS_THROTTLE_MAX = 0,
+	// Any throttle at all takes over and PAS is ignored, which is what a
+	// Cycle Analyst does
+	PAS_THROTTLE_PRIORITY
+} pas_throttle_mode;
+
+// Where the PAS brake input comes from
+typedef enum {
+	PAS_BRAKE_SRC_NONE = 0,
+	PAS_BRAKE_SRC_ADC
+} pas_brake_source;
 
 typedef struct {
 	adc_control_type ctrl_type;
@@ -761,6 +815,38 @@ typedef struct {
 	float ramp_time_pos;
 	float ramp_time_neg;
 	uint32_t update_rate_hz;
+	pas_torque_source torque_source;
+	pas_adc_ch torque_adc_ch;
+	float torque_zero_v;
+	float torque_nm_per_v;
+	float torque_max_nm;
+	float torque_deadband_nm;
+	float assist_gain;
+	uint16_t torque_avg_pulses;
+	float taper_start_kmh;
+	float taper_end_kmh;
+	float power_max_w;
+	bool pedal_stop_hard;
+	pas_brake_source brake_source;
+	pas_adc_ch brake_adc_ch;
+	float brake_threshold_v;
+	bool brake_invert;
+	float cadence_floor_rpm;
+	float start_timeout_s;
+	float stop_timeout_s;
+	bool torque_bipolar;
+	float assist_start_w;
+	pas_throttle_mode throttle_mode;
+	float throttle_no_pedal_kmh;
+	pas_walk_source walk_source;
+	pas_adc_ch walk_adc_ch;
+	float walk_threshold_v;
+	bool walk_invert;
+	float walk_max_kmh;
+	float walk_current;
+	bool walk_require_pedal;
+	pas_power_ctrl_mode power_ctrl_mode;
+	float power_gain;
 } pas_config;
 
 // NRF Datatypes

@@ -81,6 +81,31 @@ bool app_pas_is_running(void);
 void app_pas_configure(pas_config *conf);
 float app_pas_get_current_target_rel(void);
 float app_pas_get_pedal_rpm(void);
+float app_pas_get_torque_nm(void);
+float app_pas_get_torque_ratio(void);
+bool app_pas_torque_saturated(void);
+bool app_pas_torque_ch_invalid(void);
+float app_pas_get_rider_power(void);
+float app_pas_get_assist_basis_power(void);
+float app_pas_get_speed_taper(void);
+int app_pas_get_flags(void);
+float app_pas_apply_to_throttle(float throttle_rel);
+void app_pas_walk_set(bool active);
+float pas_mix_throttle(float throttle_rel, float pas_rel);
+
+// Bits returned by app_pas_get_flags()
+#define PAS_FLAG_TORQUE_SATURATED		(1 << 0)
+#define PAS_FLAG_TORQUE_CH_INVALID		(1 << 1)
+#define PAS_FLAG_BRAKE_CH_INVALID		(1 << 2)
+#define PAS_FLAG_BRAKE_ENGAGED			(1 << 3)
+#define PAS_FLAG_PINS_UNAVAILABLE		(1 << 4)
+#define PAS_FLAG_SENSOR_UNSUPPORTED		(1 << 5)
+#define PAS_FLAG_TORQUE_SRC_UNSUPPORTED	(1 << 6)
+#define PAS_FLAG_SPEED_LIMITED			(1 << 7)
+#define PAS_FLAG_WALK_ACTIVE			(1 << 8)
+#define PAS_FLAG_WALK_CH_INVALID		(1 << 9)
+float app_pas_get_motor_power_target(void);
+float app_pas_get_measured_power(void);
 void app_pas_set_current_sub_scaling(float current_sub_scaling);
 
 // Custom apps

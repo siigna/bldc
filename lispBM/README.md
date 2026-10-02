@@ -558,6 +558,22 @@ Note: The AUX output mode must be set to Unused in Motor Settings->General->Adva
 
 ---
 
+#### get-aux
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(get-aux port)
+```
+
+Returns true when the given auxiliary output is on, where `port` is 1 or 2. This reads the output pin, so it reflects whatever is driving it: the Auxiliary Output Mode in the motor configuration, which is how a cooling fan is usually switched, or [set-aux](#set-aux).
+
+A board that has no auxiliary output, or drives one through something other than a plain GPIO, reads as off.
+
+---
+
 #### get-imu-rpy
 
 | Platforms | Firmware |
@@ -1170,6 +1186,123 @@ Returns the pedal RPM measured by the PAS-app. If you want to implement your own
 
 ---
 
+#### app-pas-get-torque
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(app-pas-get-torque)
+```
+
+Returns the crank torque in Nm measured by the PAS-app, after the zero offset, scale, deadband and limits have been applied. Zero if no torque source is configured.
+
+---
+
+#### app-pas-get-rider-power
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(app-pas-get-rider-power)
+```
+
+Returns the rider power in watts, which is the crank torque times the actual pedal cadence. Note that the Proportional Power control type computes its assist from a floored cadence instead, so this is what the rider is contributing rather than what the assist is based on. See [app-pas-get-assist-power](#app-pas-get-assist-power).
+
+---
+
+#### app-pas-get-assist-power
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(app-pas-get-assist-power)
+```
+
+Returns the motor power target in watts that the Proportional Power control type is asking for, before it is converted to a current and before the current limits apply. Zero for the other control types.
+
+---
+
+#### app-pas-get-measured-power
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(app-pas-get-measured-power)
+```
+
+Returns the input power in watts the controller is actually drawing, which is what the closed loop power control compares its request against. Only updated while the Proportional Power control type is running.
+
+Note that this can also be computed from the realtime log without any of these extensions, as `v_in` multiplied by `current_in`, both of which are already logged. Plotting that against `pas_assist_watts` is how the power gain is tuned.
+
+---
+
+#### app-pas-get-output
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(app-pas-get-output)
+```
+
+Returns the relative current the PAS-app is commanding, from 0.0 to 1.0, after ramping and all limits. This is the same value the ADC-app reads when both apps are running.
+
+---
+
+#### app-pas-get-flags
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(app-pas-get-flags)
+```
+
+Returns a bitfield of conditions in the PAS-app that are worth reporting:
+
+| Bit | Meaning |
+|---|---|
+| 0 | The torque sensor reading is at or above the ADC reference, so torque above that point cannot be measured |
+| 1 | The configured torque ADC channel does not exist on this hardware |
+| 2 | The configured brake ADC channel does not exist on this hardware |
+| 3 | The brake is applied |
+| 4 | The pedal sensor pins could not be claimed, so there is no cadence input |
+| 5 | The configured sensor type is not supported |
+| 6 | The hardware torque source is selected but this board does not implement one |
+| 7 | Assist is being reduced by the road speed taper |
+| 8 | Walk assist is driving |
+| 9 | The configured walk assist ADC channel does not exist on this hardware |
+
+---
+
+#### app-pas-walk-set
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(app-pas-walk-set active)
+```
+
+Request or release PAS walk assist, where `active` is true, false or a number. Requires the PAS walk assist source to be set to Script.
+
+This is a keepalive rather than a latch: **it must be called repeatedly while the button is held, because the request expires after 0.5 seconds**. A display that loses power, or a script that stops running while the button is held, therefore releases walk assist instead of leaving the motor driving.
+
+Walk assist replaces the normal PAS output rather than adding to it, bypasses the output ramp so that releasing it stops the motor at once, is limited by its own speed setting rather than the assist speed taper, and is overridden by the brake input. Unlike the pedal assist control types it will drive with the cranks stopped, which is the point of it; set PAS Walk Requires Pedalling if that is not wanted.
+
+---
+
 ### Motor Set Commands
 
 ---
@@ -1343,6 +1476,20 @@ Run FOC in open loop in phase mode. Phase is the electrical position of the open
 ```
 
 Set kill switch state. When state is set to 1 the motor is disabled and optionally braking if timeout_brake_current is greater than 0. The kill switch overrides all other inputs and can be used as an emergency stop. The kill switch state here is applied as logic OR with the app settings kill switch input, so as long as any of them is active the motor will be disabled.
+
+---
+
+#### get-kill-sw
+
+| Platforms | Firmware |
+|---|---|
+| ESC | 7.02+ |
+
+```clj
+(get-kill-sw)
+```
+
+Returns true when the kill switch is active, meaning the motor is being held at the timeout brake current regardless of any input. Reflects whichever source the kill switch mode selects, including one asserted from LispBM with [set-kill-sw](#set-kill-sw).
 
 ---
 
@@ -4279,6 +4426,16 @@ The following selection of app and motor parameters can be read and set from Lis
 'adc-coast-brake-level  ; Brake to apply when coasting (Added in FW 7.01)
 'adc-coast-brake-ramp-time ; Time to ramp up coasting brake in seconds (Added in FW 7.01)
 'pas-current-scaling    ; PAS current scaling (Added in FW 6.05)
+'pas-ctrl-type          ; PAS control type (Added in FW 7.02)
+'pas-magnets            ; Pulses per crank revolution (Added in FW 7.02)
+'pas-start-timeout-s    ; Pedalling start threshold (Added in FW 7.02)
+'pas-stop-timeout-s     ; Pedalling stop threshold (Added in FW 7.02)
+'pas-torque-zero-v      ; Torque sensor zero voltage (Added in FW 7.02)
+'pas-torque-nm-per-v    ; Torque sensor scale (Added in FW 7.02)
+'pas-assist-gain        ; Motor watts per rider watt (Added in FW 7.02)
+'pas-taper-start-kmh    ; Speed taper start (Added in FW 7.02)
+'pas-taper-end-kmh      ; Speed taper end (Added in FW 7.02)
+'pas-power-max-w        ; PAS power cap (Added in FW 7.02)
 
 ; VESC Remote App (Added in firmware 7.00)
 'vr-ctrl-type           ; Control Type

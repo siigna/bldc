@@ -434,6 +434,10 @@ static THD_FUNCTION(adc_thread, arg) {
 		case ADC_CTRL_TYPE_CURRENT_REV_CENTER:
 		case ADC_CTRL_TYPE_CURRENT_REV_BUTTON:
 			current_mode = true;
+			// Combined with the pedal assist output according to the policy in the
+			// PAS configuration. These types previously had no combining at all, so
+			// the PAS app produced nothing in APP_ADC_PAS with any of them selected.
+			pwr = app_pas_apply_to_throttle(pwr);
 			current_rel = pwr;
 
 			if (fabsf(pwr) < 0.001) {
@@ -448,10 +452,10 @@ static THD_FUNCTION(adc_thread, arg) {
 		case ADC_CTRL_TYPE_CURRENT_REV_BUTTON_BRAKE_ADC:
 			current_mode = true;
 			if (pwr >= 0.0) {
-				// if pedal assist (PAS) thread is running, use the highest current command
-				if (app_pas_is_running()) {
-					pwr = utils_max_abs(pwr, app_pas_get_current_target_rel());
-				}
+				// Combined with the pedal assist output according to the policy in
+				// the PAS configuration. This used to be a fixed "use whichever is
+				// larger" here and nowhere else.
+				pwr = app_pas_apply_to_throttle(pwr);
 				current_rel = pwr;
 			} else {
 				current_rel = fabsf(pwr);

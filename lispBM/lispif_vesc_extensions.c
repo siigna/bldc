@@ -275,6 +275,16 @@ typedef struct {
 	lbm_uint adc_tc;
 	lbm_uint adc_tc_max_diff;
 	lbm_uint pas_current_scaling;
+	lbm_uint pas_assist_gain;
+	lbm_uint pas_taper_start_kmh;
+	lbm_uint pas_taper_end_kmh;
+	lbm_uint pas_power_max_w;
+	lbm_uint pas_torque_zero_v;
+	lbm_uint pas_torque_nm_per_v;
+	lbm_uint pas_magnets;
+	lbm_uint pas_ctrl_type;
+	lbm_uint pas_start_timeout_s;
+	lbm_uint pas_stop_timeout_s;
 	lbm_uint vr_ctrl_type;
 	lbm_uint vr_hyst;
 	lbm_uint vr_ramp_time_pos;
@@ -731,6 +741,26 @@ static bool compare_symbol(lbm_uint sym, lbm_uint *comp) {
 			lbm_add_symbol_const("adc-tc-max-diff", comp);
 		} else if (comp == &syms_vesc.pas_current_scaling) {
 			lbm_add_symbol_const("pas-current-scaling", comp);
+		} else if (comp == &syms_vesc.pas_assist_gain) {
+			lbm_add_symbol_const("pas-assist-gain", comp);
+		} else if (comp == &syms_vesc.pas_taper_start_kmh) {
+			lbm_add_symbol_const("pas-taper-start-kmh", comp);
+		} else if (comp == &syms_vesc.pas_taper_end_kmh) {
+			lbm_add_symbol_const("pas-taper-end-kmh", comp);
+		} else if (comp == &syms_vesc.pas_power_max_w) {
+			lbm_add_symbol_const("pas-power-max-w", comp);
+		} else if (comp == &syms_vesc.pas_torque_zero_v) {
+			lbm_add_symbol_const("pas-torque-zero-v", comp);
+		} else if (comp == &syms_vesc.pas_torque_nm_per_v) {
+			lbm_add_symbol_const("pas-torque-nm-per-v", comp);
+		} else if (comp == &syms_vesc.pas_magnets) {
+			lbm_add_symbol_const("pas-magnets", comp);
+		} else if (comp == &syms_vesc.pas_ctrl_type) {
+			lbm_add_symbol_const("pas-ctrl-type", comp);
+		} else if (comp == &syms_vesc.pas_start_timeout_s) {
+			lbm_add_symbol_const("pas-start-timeout-s", comp);
+		} else if (comp == &syms_vesc.pas_stop_timeout_s) {
+			lbm_add_symbol_const("pas-stop-timeout-s", comp);
 		} else if (comp == &syms_vesc.vr_ctrl_type) {
 			lbm_add_symbol_const("vr-ctrl-type", comp);
 		} else if (comp == &syms_vesc.vr_hyst) {
@@ -1246,6 +1276,20 @@ static lbm_value ext_systime(lbm_value *args, lbm_uint argn) {
 static lbm_value ext_secs_since(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_ARGN_NUMBER(1);
 	return lbm_enc_float(UTILS_AGE_S(lbm_dec_as_u32(args[0])));
+}
+
+static lbm_value ext_get_aux(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN_NUMBER(1);
+
+	int port = lbm_dec_as_u32(args[0]);
+
+	if (port == 1) {
+		return AUX_READ() ? ENC_SYM_TRUE : ENC_SYM_NIL;
+	} else if (port == 2) {
+		return AUX2_READ() ? ENC_SYM_TRUE : ENC_SYM_NIL;
+	}
+
+	return ENC_SYM_TERROR;
 }
 
 static lbm_value ext_set_aux(lbm_value *args, lbm_uint argn) {
@@ -1894,6 +1938,52 @@ static lbm_value ext_app_pas_get_rpm(lbm_value *args, lbm_uint argn) {
 	return lbm_enc_float(app_pas_get_pedal_rpm());
 }
 
+static lbm_value ext_app_pas_get_torque(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_torque_nm());
+}
+
+static lbm_value ext_app_pas_get_rider_power(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_rider_power());
+}
+
+static lbm_value ext_app_pas_get_assist_power(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_motor_power_target());
+}
+
+static lbm_value ext_app_pas_get_measured_power(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_measured_power());
+}
+
+static lbm_value ext_app_pas_get_output(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_current_target_rel());
+}
+
+static lbm_value ext_app_pas_get_flags(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_i(app_pas_get_flags());
+}
+
+static lbm_value ext_app_pas_walk_set(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN(1);
+	bool active = false;
+
+	if (lbm_is_number(args[0])) {
+		active = lbm_dec_as_i32(args[0]) != 0;
+	} else if (lbm_is_symbol_true(args[0])) {
+		active = true;
+	} else if (!lbm_is_symbol_nil(args[0])) {
+		return ENC_SYM_TERROR;
+	}
+
+	app_pas_walk_set(active);
+	return ENC_SYM_TRUE;
+}
+
 // Motor set commands
 
 static lbm_value ext_set_current(lbm_value *args, lbm_uint argn) {
@@ -2001,6 +2091,11 @@ static lbm_value ext_set_kill_sw(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_ARGN_NUMBER(1);
 	timeout_set_kill_sw_ext(lbm_dec_as_i32(args[0]) > 0);
 	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_get_kill_sw(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return timeout_kill_sw_active() ? ENC_SYM_TRUE : ENC_SYM_NIL;
 }
 
 static lbm_value ext_foc_beep(lbm_value *args, lbm_uint argn) {
@@ -4209,6 +4304,36 @@ static lbm_value ext_conf_set(lbm_value *args, lbm_uint argn) {
 		} else if (compare_symbol(name, &syms_vesc.pas_current_scaling)) {
 			appconf->app_pas_conf.current_scaling = lbm_dec_as_float(args[1]);
 			changed_app = 2;
+		} else if (compare_symbol(name, &syms_vesc.pas_assist_gain)) {
+			appconf->app_pas_conf.assist_gain = lbm_dec_as_float(args[1]);
+			changed_app = 2;
+		} else if (compare_symbol(name, &syms_vesc.pas_taper_start_kmh)) {
+			appconf->app_pas_conf.taper_start_kmh = lbm_dec_as_float(args[1]);
+			changed_app = 2;
+		} else if (compare_symbol(name, &syms_vesc.pas_taper_end_kmh)) {
+			appconf->app_pas_conf.taper_end_kmh = lbm_dec_as_float(args[1]);
+			changed_app = 2;
+		} else if (compare_symbol(name, &syms_vesc.pas_power_max_w)) {
+			appconf->app_pas_conf.power_max_w = lbm_dec_as_float(args[1]);
+			changed_app = 2;
+		} else if (compare_symbol(name, &syms_vesc.pas_torque_zero_v)) {
+			appconf->app_pas_conf.torque_zero_v = lbm_dec_as_float(args[1]);
+			changed_app = 2;
+		} else if (compare_symbol(name, &syms_vesc.pas_torque_nm_per_v)) {
+			appconf->app_pas_conf.torque_nm_per_v = lbm_dec_as_float(args[1]);
+			changed_app = 2;
+		} else if (compare_symbol(name, &syms_vesc.pas_magnets)) {
+			appconf->app_pas_conf.magnets = lbm_dec_as_i32(args[1]);
+			changed_app = 2;
+		} else if (compare_symbol(name, &syms_vesc.pas_ctrl_type)) {
+			appconf->app_pas_conf.ctrl_type = lbm_dec_as_i32(args[1]);
+			changed_app = 2;
+		} else if (compare_symbol(name, &syms_vesc.pas_start_timeout_s)) {
+			appconf->app_pas_conf.start_timeout_s = lbm_dec_as_float(args[1]);
+			changed_app = 2;
+		} else if (compare_symbol(name, &syms_vesc.pas_stop_timeout_s)) {
+			appconf->app_pas_conf.stop_timeout_s = lbm_dec_as_float(args[1]);
+			changed_app = 2;
 		} else if (compare_symbol(name, &syms_vesc.vr_ctrl_type)) {
 			appconf->app_chuk_conf.ctrl_type = lbm_dec_as_i32(args[1]);
 			changed_app = 2;
@@ -4630,6 +4755,26 @@ static lbm_value ext_conf_get(lbm_value *args, lbm_uint argn) {
 		res = lbm_enc_float(appconf->app_adc_conf.tc_max_diff);
 	} else if (compare_symbol(name, &syms_vesc.pas_current_scaling)) {
 		res = lbm_enc_float(appconf->app_pas_conf.current_scaling);
+	} else if (compare_symbol(name, &syms_vesc.pas_assist_gain)) {
+		res = lbm_enc_float(appconf->app_pas_conf.assist_gain);
+	} else if (compare_symbol(name, &syms_vesc.pas_taper_start_kmh)) {
+		res = lbm_enc_float(appconf->app_pas_conf.taper_start_kmh);
+	} else if (compare_symbol(name, &syms_vesc.pas_taper_end_kmh)) {
+		res = lbm_enc_float(appconf->app_pas_conf.taper_end_kmh);
+	} else if (compare_symbol(name, &syms_vesc.pas_power_max_w)) {
+		res = lbm_enc_float(appconf->app_pas_conf.power_max_w);
+	} else if (compare_symbol(name, &syms_vesc.pas_torque_zero_v)) {
+		res = lbm_enc_float(appconf->app_pas_conf.torque_zero_v);
+	} else if (compare_symbol(name, &syms_vesc.pas_torque_nm_per_v)) {
+		res = lbm_enc_float(appconf->app_pas_conf.torque_nm_per_v);
+	} else if (compare_symbol(name, &syms_vesc.pas_magnets)) {
+		res = lbm_enc_i(appconf->app_pas_conf.magnets);
+	} else if (compare_symbol(name, &syms_vesc.pas_ctrl_type)) {
+		res = lbm_enc_i(appconf->app_pas_conf.ctrl_type);
+	} else if (compare_symbol(name, &syms_vesc.pas_start_timeout_s)) {
+		res = lbm_enc_float(appconf->app_pas_conf.start_timeout_s);
+	} else if (compare_symbol(name, &syms_vesc.pas_stop_timeout_s)) {
+		res = lbm_enc_float(appconf->app_pas_conf.stop_timeout_s);
 	} else if (compare_symbol(name, &syms_vesc.vr_ctrl_type)) {
 		res = lbm_enc_i(appconf->app_chuk_conf.ctrl_type);
 	} else if (compare_symbol(name, &syms_vesc.vr_hyst)) {
@@ -6588,6 +6733,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("systime", ext_systime);
 		lbm_add_extension("secs-since", ext_secs_since);
 		lbm_add_extension("set-aux", ext_set_aux);
+		lbm_add_extension("get-aux", ext_get_aux);
 		lbm_add_extension("event-enable", ext_enable_event);
 		lbm_add_extension("get-imu-rpy", ext_get_imu_rpy);
 		lbm_add_extension("get-imu-quat", ext_get_imu_quat);
@@ -6630,6 +6776,13 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("app-disable-output", ext_app_disable_output);
 		lbm_add_extension("app-is-output-disabled", ext_app_is_output_disabled);
 		lbm_add_extension("app-pas-get-rpm", ext_app_pas_get_rpm);
+		lbm_add_extension("app-pas-get-torque", ext_app_pas_get_torque);
+		lbm_add_extension("app-pas-get-rider-power", ext_app_pas_get_rider_power);
+		lbm_add_extension("app-pas-get-assist-power", ext_app_pas_get_assist_power);
+		lbm_add_extension("app-pas-get-measured-power", ext_app_pas_get_measured_power);
+		lbm_add_extension("app-pas-get-output", ext_app_pas_get_output);
+		lbm_add_extension("app-pas-get-flags", ext_app_pas_get_flags);
+		lbm_add_extension("app-pas-walk-set", ext_app_pas_walk_set);
 
 		// Motor set commands
 		lbm_add_extension("set-current", ext_set_current);
@@ -6645,6 +6798,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("foc-openloop-phase", ext_foc_openloop_phase);
 //		lbm_add_extension("foc-set-fw-override", ext_foc_set_fw_override);
 		lbm_add_extension("set-kill-sw", ext_set_kill_sw);
+		lbm_add_extension("get-kill-sw", ext_get_kill_sw);
 
 		lbm_add_extension("foc-beep", ext_foc_beep);
 		lbm_add_extension("foc-play-tone", ext_foc_play_tone);

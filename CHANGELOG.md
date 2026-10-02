@@ -1,3 +1,63 @@
+### 7.02
+#### TBD
+* App PAS fixes:
+	* The pedal sensor filter setting is now applied. It selected a low-pass that was configured to pass the input through unchanged.
+	* Cadence no longer loses accuracy as uptime grows. Pedal timing was taken as a difference of absolute float seconds.
+	* The pedal sensor type setting is now read, and an unsupported value reports rather than decoding as if it were supported.
+	* The torque control types report on hardware without a torque sensor instead of producing no output.
+	* Selecting the torque type with the cadence timeout now samples the torque sensor. It previously only worked when entered by fall-through.
+	* The pedal decoder and output ramp are reset when the app is reconfigured or restarted.
+	* The COMM UART pads, which are the fallback when a board has no dedicated pedal sensor pins, are no longer reconfigured as inputs while UART communication is in use.
+	* Added the pas_status terminal command.
+* App PAS sensor support:
+	* Single wire pedal sensors, in addition to quadrature.
+	* Analog torque sensors on a configurable ADC channel, with a configurable zero point, scale in Nm/V, full scale and deadband. Previously a torque sensor needed a board specific implementation, which only one board has.
+	* Crank torque is carried in Nm rather than as a ratio of full scale.
+	* A torque sensor reading at or above the ADC reference is reported as saturated rather than appearing as a plateau in the assist.
+	* An ADC channel the hardware does not provide is rejected. hw.h aliases the unavailable channels to the first one, so such a setting would otherwise read the throttle input.
+	* Added the pas_torque terminal command, which reads the sensor and measures its zero point.
+* App PAS proportional power control:
+	* New Proportional Power control type: motor power is a configurable multiple of rider power, where rider power is crank torque times cadence. Rider power was not a concept the app had.
+	* Optional revolution synchronous torque averaging, over a configurable number of pedal pulses. Crank torque varies strongly within a pedal stroke, and averaging whole pulse intervals does not change character with cadence the way a time constant does.
+	* The power request is converted to current against the measured input voltage, which is floored so that a low reading cannot inflate the request.
+	* The previously unlisted fourth PAS control type is now named in VESC Tool. It behaves identically to Constant Torque.
+* App PAS limits:
+	* Road speed taper: full assist below a start speed, falling linearly to nothing at an end speed. Setting the two equal gives a hard cutoff.
+	* Power cap in watts, applied to every control type rather than only to Proportional Power.
+	* Optional hard cut when the cranks stop, instead of ramping down over the negative ramp time.
+	* Brake input on a configurable ADC channel with a threshold and optional inversion, which cuts assist immediately. The PAS app had no brake input at all, and in the combined ADC and PAS mode the two outputs are merged by taking the larger, so brake handling on the ADC side did not suppress PAS.
+	* Added the pas_preset terminal command, with a pedelec preset.
+* App PAS pedalling detection and assist cadence, following the Grin Cycle Analyst manuals:
+	* Separate start and stop thresholds for pedalling detection, in seconds. These are tuned in opposite directions, so the single derived period the app used before could not serve both. Zero derives the old value, which for a low pole count sensor is a much longer cutoff than is wanted.
+	* A cadence floor for the assist calculation in Proportional Power, defaulting to 55 rpm. Power is torque times cadence, which collapses as the cranks slow, so without a floor there is the least assist when pulling away from a standstill.
+	* Reported rider power now uses the real cadence while the assist uses the floored one, so telemetry does not overstate what the rider is contributing.
+* App PAS telemetry:
+	* New LispBM extensions: app-pas-get-torque, app-pas-get-rider-power, app-pas-get-assist-power, app-pas-get-output and app-pas-get-flags.
+	* PAS cadence, torque, rider power, assist power, output and status flags added to COMM_GET_VALUES as mask bit 22, so VESC Tool can plot and log them.
+	* app_pas_get_current_target_rel() now reports the output in both PAS modes. It was only written when PAS was not the primary output, so it read zero in the mode where PAS drives the motor.
+* App PAS throttle mixing and further Cycle Analyst behaviour:
+	* Configurable mixing with a throttle: highest wins, which is what this firmware has always done, or throttle priority, which is what a Cycle Analyst does.
+	* PAS output is now combined with the throttle for every current based ADC control type. It was only combined for the five brake types, so with ADC_CTRL_TYPE_CURRENT and the plain reverse types the PAS app ran and contributed nothing.
+	* Optional requirement that the throttle only works while pedalling above a configured road speed, the Cycle Analyst MxThrotSpd behaviour.
+	* Support for bipolar torque sensors, which rest mid range and swing both ways to measure the left and right pedal separately, such as a Thun.
+	* A minimum rider power before the motor contributes anything, subtracted from the assist basis before the gain, as a Cycle Analyst applies its start level.
+	* app_pas_stop() now clears the exported current target in both modes. It was only cleared when PAS was not the primary output, which matters now that the throttle app reads it for every current control type.
+* Added get-kill-sw, so the kill switch state can be read and not only set.
+* conf-set and conf-get reach ten more PAS parameters: the control type, pulses per revolution, both pedalling thresholds, the torque zero and scale, the assist gain, both taper speeds and the power cap. Only the current scaling was reachable before, so a script or a display could not adjust or report any of the rest.
+* Added get-aux, which reads back an auxiliary output. That is how a cooling fan switched by the Auxiliary Output Mode can be reported. Derived from the same pins the existing AUX_ON and AUX_OFF macros use, so it covers every board that drives aux as a plain GPIO.
+* App PAS closed loop power control:
+	* Proportional Power can now trim its request against measured input power, which is what a Cycle Analyst does with its power PID. Open loop remains the default.
+	* The open loop estimate is kept as a feedforward term and the gain only corrects the residual, so it can be small and the sluggish startup a Cycle Analyst gets from too low a power gain does not arise.
+	* The loop only closes when PAS is the only thing driving. In the combined ADC and PAS app the measured power includes the throttle, which is not attributable to the PAS request.
+	* Added app-pas-get-measured-power.
+* App PAS walk assist:
+	* Walk assist, triggered either by a LispBM script through the new app-pas-walk-set extension or by a switch on a configurable ADC channel.
+	* A script request is a keepalive that expires after half a second, so a display that loses power or a script that stops while the button is held releases it rather than leaving the motor driving.
+	* It replaces the normal PAS output rather than adding to it, bypasses the output ramp so releasing it stops the motor at once, has its own speed limit that it fades out against, and is overridden by the brake.
+	* It drives with the cranks stopped, which is the point of it, so PAS Walk Requires Pedalling is there for anyone who would rather it did not.
+	* The PAS status flags are now sixteen bits on the wire rather than eight, since the set needs nine.
+	* The parameter descriptions now carry what the Grin Cycle Analyst manuals give for setting these by hand: how to determine the pulses per crank revolution, typical scales for bottom bracket and chain tension sensors, the bench procedure for measuring the scale with a known weight, and that a chain tension sensor's scale depends on chainring size. The pas_torque terminal command prints the same procedure.
+
 ### 7.01
 #### TBD
 * Major IMU refactor, IMU DRDY support. See https://github.com/vedderb/bldc/pull/917
@@ -9,7 +69,6 @@
 	* Many new extensions and access to more configuration parameters.
 * Added PWM + ABI Inverted encoder mode.
 * App ADC coasting brake support.
-
 ### 7.00
 #### 2026-05-15
 * Configurable HFI reset ERPM.
