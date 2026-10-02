@@ -156,7 +156,17 @@
 	X(can_status_rate_1, CONF_PLAIN, can_status_rate_1) \
 	X(can_status_rate_2, CONF_PLAIN, can_status_rate_2) \
 	X(controller_id, CONF_PLAIN, controller_id) \
+	X(pas_assist_gain, CONF_APPLY, app_pas_conf.assist_gain) \
+	X(pas_ctrl_type, CONF_APPLY, app_pas_conf.ctrl_type) \
 	X(pas_current_scaling, CONF_APPLY, app_pas_conf.current_scaling) \
+	X(pas_magnets, CONF_APPLY, app_pas_conf.magnets) \
+	X(pas_power_max_w, CONF_APPLY, app_pas_conf.power_max_w) \
+	X(pas_start_timeout_s, CONF_APPLY, app_pas_conf.start_timeout_s) \
+	X(pas_stop_timeout_s, CONF_APPLY, app_pas_conf.stop_timeout_s) \
+	X(pas_taper_end_kmh, CONF_APPLY, app_pas_conf.taper_end_kmh) \
+	X(pas_taper_start_kmh, CONF_APPLY, app_pas_conf.taper_start_kmh) \
+	X(pas_torque_nm_per_v, CONF_APPLY, app_pas_conf.torque_nm_per_v) \
+	X(pas_torque_zero_v, CONF_APPLY, app_pas_conf.torque_zero_v) \
 	X(ppm_ctrl_type, CONF_APPLY, app_ppm_conf.ctrl_type) \
 	X(ppm_hyst, CONF_APPLY, app_ppm_conf.hyst) \
 	X(ppm_pulse_center, CONF_APPLY, app_ppm_conf.pulse_center) \
@@ -184,6 +194,6 @@
 	/* end */
 
 #define CONF_MC_PARAM_COUNT 88
-#define CONF_APP_PARAM_COUNT 48
+#define CONF_APP_PARAM_COUNT 58
 
 // clang-format on

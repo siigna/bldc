@@ -17,6 +17,8 @@
 #include "script_lua.h"
 #include "script_alloc.h"
 #include "lua_vesc_conf.h"
+/* for CONF_MC_PARAM_COUNT / CONF_APP_PARAM_COUNT: macro definitions only */
+#include "lua_vesc_conf_table.h"
 
 #include "mc_interface.h"
 #include "app.h"
@@ -112,11 +114,31 @@ static THD_FUNCTION(engine, arg) {
 	fake_mc.mcconf.si_wheel_diameter = 0.6f;
 
 	/* --- the table is reachable and has the expected size -------------- */
+	/*
+	 * Derived from the generated counts, not written down. A hardcoded 143
+	 * here failed the moment the PAS branch added ten parameters to the lisp
+	 * chains and the table was regenerated -- the number was right about the
+	 * code and wrong about the tree.
+	 */
 	out_reset();
 	run("conf_names", "print(#vesc.conf_names())");
-	/* 136 generated + 5 scaled + min_speed + max_speed */
-	qrt_expect_ok("conf_names lists every parameter",
-			strstr(m_out, "143") != NULL);
+	{
+		char want[16];
+		int n = CONF_MC_PARAM_COUNT + CONF_APP_PARAM_COUNT
+				+ 5          /* the scaled FOC constants */
+				+ 2;         /* min_speed and max_speed */
+
+		snprintf(want, sizeof(want), "%d", n);
+		if (strstr(m_out, want) == NULL) {
+			qrt_puts("  conf_names: got [");
+			qrt_puts(m_out);
+			qrt_puts("] want ");
+			qrt_puts(want);
+			qrt_puts("\r\n");
+		}
+		qrt_expect_ok("conf_names lists every parameter",
+				strstr(m_out, want) != NULL);
+	}
 
 	/*
 	 * --- every parameter is readable ----------------------------------
