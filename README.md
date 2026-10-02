@@ -213,8 +213,17 @@ However, to upload a firmware to a bricked controller, you have to use a SWD Deb
 
 ## Contribute
 
-Head to the [forums](https://vesc-project.com/forum) to get involved and improve this project.
-Join the [Discord](https://discord.gg/JgvV5NwYts) for real-time support and chat
+Issues and pull requests here:
+[github.com/siigna/bldc](https://github.com/siigna/bldc).
+
+This fork has no forum or chat of its own. The upstream ones are not the place
+for questions about it — they support the VESC® firmware, not this, and
+sending traffic there would waste their time and misrepresent whose software
+you are running.
+
+If the change you want belongs upstream rather than here, upstream is the
+better home for it: a fix to the motor control or a new hardware target
+reaches far more people there than on this branch.
 
 ## Tags
 
