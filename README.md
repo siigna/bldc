@@ -1,17 +1,87 @@
-# VESC firmware
+# ESCargot
+
+Motor controller firmware. A fork of the VESC® firmware, with a Lua script
+engine and first-class pedal-assist support added.
+
+**Not affiliated with, endorsed by, or certified by Mr. Benjamin Vedder.**
+VESC® is his registered trademark; see [TRADEMARKS.md](TRADEMARKS.md). This
+firmware is compatible with VESC® Tool, which is what uploads scripts and
+writes the configuration.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![GitHub Actions Status](https://github.com/vedderb/bldc/actions/workflows/nix.yml/badge.svg?branch=master)](https://github.com/vedderb/bldc/actions/workflows/nix.yml)
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/75e90ffbd46841a3a7be2a9f7a94c242)](https://www.codacy.com/app/vedderb/bldc?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=vedderb/bldc&amp;utm_campaign=Badge_Grade)
-[![Contributors](https://img.shields.io/github/contributors/vedderb/bldc.svg)](https://github.com/vedderb/bldc/graphs/contributors)
-[![Watchers](https://img.shields.io/github/watchers/vedderb/bldc.svg)](https://github.com/vedderb/bldc/watchers)
-[![Stars](https://img.shields.io/github/stars/vedderb/bldc.svg)](https://github.com/vedderb/bldc/stargazers)
-[![Forks](https://img.shields.io/github/forks/vedderb/bldc.svg)](https://github.com/vedderb/bldc/network/members)
 
-An open source motor controller firmware.
+## What this fork adds
 
-This is the source code for the VESC DC/BLDC/FOC controller. Read more at
-[https://vesc-project.com/](https://vesc-project.com/)
+### A Lua script engine, as an alternative to LispBM
+
+`USE_LUA=1` requires `USE_LISPBM=0`; the two engines are mutually exclusive
+and nothing picks between them at runtime. On an STM32F405 that is not a style
+choice — the LispBM build is 96% of the app partition, and dropping it is what
+makes room.
+
+```bash
+make fw_75_100_V2 USE_LISPBM=0 USE_LUA=1
+```
+
+Measured on `75_100_V2`:
+
+| | app flash | CCM (`.ram4`) |
+|---|---|---|
+| LispBM | 96.1% | 99.6% |
+| Lua | 89.3% | 72.5% |
+
+The same container format, the same `COMM_LISP_*` packets, so VESC® Tool's
+existing upload, erase and REPL carry Lua unchanged. Bindings cover the motor,
+the configuration (153 parameters), the CAN bus and the inputs.
+
+146 of those come from a parameter table **generated** from the LispBM
+extensions rather than retyped; the other seven are scaled or computed and are
+written out by hand. `tests/conf_table` regenerates the table and fails if the
+two drift, because a round-trip test cannot catch a parameter wired to the
+field next to the right one — set-then-get agrees either way.
+
+### First-class pedal assist
+
+Sensor front-ends, closed-loop power control, walk assist, an eRider
+GTL-T17-73 preset, and the PAS configuration reachable from `conf-set` and
+`conf-get`. Tested across every board variant, with sanitizers, coverage and a
+property fuzzer.
+
+### A simulated STM32F405
+
+`qemu-system-arm -M olimex-stm32-h405` models the part this firmware targets,
+so the real ChibiOS kernel runs without a board — enough to exercise a thread,
+a mutex, an event, a timed sleep and a working area in CCM. It found three
+firmware bugs that reading the code had not, including that Lua's default
+`LUAI_MAXCCALLS` of 200 needs 95 KB of stack against the 64 KB that exists.
+
+What it cannot do is anything board-specific: no ADC, CAN, SPI or FOC timers,
+no flash driver, and no meaningful wall-clock timing. See
+[tests/qemu/README.md](tests/qemu/README.md), which is explicit about the
+difference.
+
+## Tests
+
+One entry point, for everything that does not need hardware:
+
+```bash
+nix-shell -p gcc gnumake python3 gcc-arm-embedded qemu gtest cppcheck \
+    clang-tools --run ./tests/check.sh
+```
+
+Ten plain-C suites, the PAS suites across every board variant, the parameter
+table, seven QEMU images, address and undefined sanitizers, the configuration
+signature, cppcheck, clang-tidy and coverage. A build failure is a failure
+rather than a skip, and the exit status is what counts — a sanitizer abort and
+a CPU fault both exit without printing the word FAIL.
+
+Optional stages: `--fuzz` for a short fuzzing run, `--tree` for cppcheck over
+the whole firmware.
+
+## Upstream
+
+`upstream` points at `vedderb/bldc` over HTTPS and is pull-only; its push URL
+is deliberately set to `no-push`. Changes go to `origin`.
 
 ## Supported boards
 
@@ -51,7 +121,7 @@ brew install openocd
 
 ### On Ubuntu (Linux)/MacOS
 Open up a terminal
-1.  `git clone http://github.com/vedderb/bldc.git`
+1.  `git clone https://github.com/siigna/bldc.git`
 2.  `cd bldc`
 3.  Continue with [On all platforms](#on-all-platforms)
 
@@ -59,7 +129,7 @@ Open up a terminal
 
 1.  Open up a Windows Powershell terminal (Resist the urge to run Powershell as administrator, that will break things)
 2.  Type `choco install make`
-3.  `git clone http://github.com/vedderb/bldc`
+3.  `git clone https://github.com/siigna/bldc`
 4.  `cd bldc`
 5.  Continue with [On all platforms](#on-all-platforms)
 
@@ -108,7 +178,7 @@ sudo udevadm trigger
 4.  With Qt Creator, open the vesc firmware Qt Creator project, named vesc.pro. You will find it in `Project/Qt Creator/vesc.pro`
 5.  The IDE is configured by default to build 100_250 firmware, this can be changed in the bottom of the left panel, there you will find all hardware variants supported by VESC
 
-## Upload to VESC
+## Upload to a controller
 ### Method 1 - Flash it using an STLink SWD debugger
 
 1.  Build and flash the [bootloader](https://github.com/vedderb/bldc-bootloader) first
@@ -117,28 +187,28 @@ sudo udevadm trigger
 make 100_250_flash
 ```
 
-### Method 2 - Upload Firmware via VESC tool through USB
+### Method 2 - Upload firmware with VESC® Tool over USB
 
 1.  Clone and build the firmware in **.bin** format as in the above Build instructions
 
-In VESC tool
+In VESC® Tool
 
-2.  Connect to the VESC
+2.  Connect to the controller
 3.  Navigate to the Firmware tab on the left side menu 
 4.  Click on Custom file tab
 5.  Click on the folder icon to select the built firmware in .bin format (e.g. `build/100_250/100_250.bin`)
 
-##### [ Reminder : It is normal to see VESC disconnects during the firmware upload process ]  
-#####  **[ Warning : DO NOT DISCONNECT POWER/USB to VESC during the upload process, or you will risk bricking your VESC ]**  
-#####  **[ Warning : ONLY DISCONNECT your VESC 10s after the upload loading bar completed and "FW Upload DONE" ]**
+##### [ Reminder : It is normal to see the controller disconnect during the firmware upload process ]  
+#####  **[ Warning : DO NOT DISCONNECT POWER/USB to the controller during the upload process, or you will risk bricking your controller ]**  
+#####  **[ Warning : ONLY DISCONNECT your controller 10s after the upload loading bar completed and "FW Upload DONE" ]**
 
 6.  Press the upload firmware button (downward arrow) on the bottom right to start upload the selected firmware.
-7.  Wait for **10s** after the loading bar completed (Warning: unplug sooner will risk bricking your VESC)
-8.  The VESC will disconnect itself after new firmware is uploaded.
+7.  Wait for **10s** after the loading bar completed (Warning: unplug sooner will risk bricking your controller)
+8.  The controller will disconnect itself after new firmware is uploaded.
 
-## In case you bricked your VESC
-you will need to upload a new working firmware to the VESC.  
-However, to upload a firmware to a bricked VESC, you have to use a SWD Debugger.
+## In case you bricked your controller
+you will need to upload a new working firmware to the controller.  
+However, to upload a firmware to a bricked controller, you have to use a SWD Debugger.
 
 
 ## Contribute
@@ -151,7 +221,7 @@ Join the [Discord](https://discord.gg/JgvV5NwYts) for real-time support and chat
 Every firmware release has a tag. They are created as follows:
 
 ```bash
-git tag -a [version] [commit] -m "VESC Firmware Version [version]"
+git tag -a [version] [commit] -m "ESCargot firmware version [version]"
 git push --tags
 ```
 
