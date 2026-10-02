@@ -45,6 +45,14 @@ for t in angles packet_recovery float_serialization overvoltage_fault \
         stage "host tests: $t"
         if ! make --no-print-directory -C "tests/$t" clean >/dev/null 2>&1 \
              || ! out=$(make --no-print-directory -C "tests/$t" 2>&1); then
+            # A missing dependency is a skip; a real compile error is a
+            # failure. utils_math needs gtest, which the dev shell does not
+            # carry, and reporting that as FAILED hides anything else.
+            if printf '%s' "$out" | grep -q "gtest/gtest.h: No such file"; then
+                printf '  skipped: no gtest\n'
+                continue
+            fi
+
             printf '%s\n' "$out" | tail -8
             report 1
             continue
@@ -80,12 +88,20 @@ else
 fi
 
 stage "cppcheck"
+if ! command -v cppcheck >/dev/null 2>&1; then
+    # Skipped, not failed. A tool that is merely absent must not report the
+    # same way as a tool that found something, or a real finding is lost in
+    # the noise of an environment that never had it -- which is how two
+    # stages were red in the dev shell for weeks.
+    printf '  skipped: no cppcheck\n'
+else
 cppcheck --enable=warning,style,performance,portability --inline-suppr \
     --suppress=missingIncludeSystem --error-exitcode=1 --std=c99 \
     -DNO_STM32 '-DHW_SOURCE="hw.h"' '-DHW_HEADER="hw.h"' \
     -Itests/app_pas -I. -Iutil -Iapplications -Imotor -Icomm \
     --quiet applications/app_pas.c tests/app_pas/*.c
 report $?
+fi
 
 stage "clang-tidy"
 # Checks are in .clang-tidy, curated there with the reasoning. Scoped to the

@@ -23,6 +23,8 @@
 #include "lua_vesc_mc.h"
 #include "lua_vesc_io.h"
 #include "fake_io.h"
+#include "fake_pas.h"
+#include "lua_vesc_pas.h"
 
 #include "mc_interface.h"
 #include "timeout.h"
@@ -40,6 +42,8 @@ static THD_WORKING_AREA(wa_engine, 12288) __attribute__((section(".ram4")));
 
 static char m_out[1024];
 static size_t m_out_len;
+
+static void test_pas_and_time_parity(void);
 
 static void capture(const char *msg) {
 	size_t n = strlen(msg);
@@ -156,6 +160,7 @@ static THD_FUNCTION(engine, arg) {
 	}
 	script_lua_register(m_s, lua_vesc_mc_fns());
 	script_lua_register(m_s, lua_vesc_io_fns());
+	script_lua_register(m_s, lua_vesc_pas_fns());
 
 	/* tell the script a test is driving it, so it defines M and returns */
 	{
@@ -166,6 +171,7 @@ static THD_FUNCTION(engine, arg) {
 	}
 
 	fake_io_reset();
+	fake_pas_reset();
 	fake_mc.set_current = 0.0f;
 
 	/*
@@ -371,8 +377,100 @@ static THD_FUNCTION(engine, arg) {
 	qrt_expect_ok("the script disables the apps' output",
 			strstr(m_script, "app_disable_output") != NULL);
 
+	test_pas_and_time_parity();
+
 	script_lua_close(m_s);
 	m_s = NULL;
+}
+
+/* A global the parity checks set, read back the way step() does. */
+static float lua_num(const char *name) {
+	lua_State *L = script_lua_state(m_s);
+
+	lua_getglobal(L, name);
+	float v = (float)lua_tonumber(L, -1);
+	lua_pop(L, 1);
+	return v;
+}
+
+static int near(float got, float want, float tol) {
+	const float d = got - want;
+
+	return (d < tol) && (d > -tol);
+}
+
+/*
+ * The two things a Lua script could not do until now: see pedal assist, and
+ * tell the time. Runs on the engine this file already opened.
+ *
+ * Both gaps were load-bearing. LispBM has had the app-pas-* accessors since
+ * the PAS work landed, so anything reacting to pedalling had to be written in
+ * the other language; and with no clock at all there was no way to debounce
+ * an input or expire a keepalive -- the shipped example called a vesc.sleep()
+ * that never existed.
+ */
+static void test_pas_and_time_parity(void) {
+	char err[256];
+
+	fake_pas_reset();
+	fake_pas.rpm = 62.5f;
+	fake_pas.torque_nm = 11.25f;
+	fake_pas.rider_power = 73.0f;
+	fake_pas.assist_power = 146.0f;
+	fake_pas.output = 0.25f;
+	fake_pas.flags = 18;
+
+	qrt_expect_ok("a script can read cadence, torque and power",
+			script_lua_run(m_s,
+				"cad = vesc.pas_get_rpm()\n"
+				"nm = vesc.pas_get_torque()\n"
+				"rider = vesc.pas_get_rider_power()\n"
+				"assist = vesc.pas_get_assist_power()\n"
+				"out = vesc.pas_get_output()\n"
+				"fl = vesc.pas_get_flags()\n",
+				-1, "pas", err, sizeof(err)));
+
+	qrt_expect_ok("cadence", near(lua_num("cad"), 62.5f, 0.01f));
+	qrt_expect_ok("torque", near(lua_num("nm"), 11.25f, 0.01f));
+	qrt_expect_ok("rider power", near(lua_num("rider"), 73.0f, 0.01f));
+	qrt_expect_ok("assist power", near(lua_num("assist"), 146.0f, 0.01f));
+	qrt_expect_ok("assist output", near(lua_num("out"), 0.25f, 0.001f));
+	qrt_expect_ok("flags", near(lua_num("fl"), 18.0f, 0.01f));
+
+	/*
+	 * Walk assist is a keepalive, so what matters is that every call lands:
+	 * a script holding a button has to keep saying so.
+	 */
+	qrt_expect_ok("a script can drive the walk keepalive",
+			script_lua_run(m_s,
+				"vesc.pas_walk_set(true)\n"
+				"vesc.pas_walk_set(true)\n"
+				"vesc.pas_walk_set(false)\n",
+				-1, "walk", err, sizeof(err)));
+	qrt_expect_ok("every keepalive call reached the firmware",
+			fake_pas.walk_calls == 3);
+	qrt_expect_ok("and the last one released it", !fake_pas.walk_requested);
+
+	/*
+	 * The clock. secs_since is computed in C because the tick wraps, which is
+	 * the reason a script cannot simply subtract two of them.
+	 */
+	qrt_expect_ok("a script can read the tick and age it",
+			script_lua_run(m_s,
+				"t0 = vesc.systime()\n"
+				"age = vesc.secs_since(t0)\n",
+				-1, "time", err, sizeof(err)));
+	qrt_expect_ok("the tick is running", lua_num("t0") > 0.0f);
+	qrt_expect_ok("an age just taken is small and not negative",
+			(lua_num("age") >= 0.0f) && (lua_num("age") < 1.0f));
+
+	chThdSleepMilliseconds(120);
+
+	qrt_expect_ok("and it advances",
+			script_lua_run(m_s, "age2 = vesc.secs_since(t0)\n",
+				-1, "time2", err, sizeof(err)));
+	qrt_expect_ok("an age taken later is larger",
+			lua_num("age2") > lua_num("age"));
 }
 
 int main(void) {

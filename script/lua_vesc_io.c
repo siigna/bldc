@@ -42,6 +42,33 @@
 #include "timeout.h"
 #include "utils.h"
 
+/* ---------------------------------------------------------------- time --- */
+
+/*
+ * The system tick, and the age of one in seconds.
+ *
+ * Lua had no clock at all: no sleep, no tick, nothing. Any logic that needs
+ * to debounce an input, expire a keepalive or rate-limit anything had to be
+ * written in LispBM instead, and the one shipped Lua example called a
+ * vesc.sleep() that never existed. These are the same two primitives LispBM
+ * exposes as systime and secs-since, over the same ChibiOS tick.
+ *
+ * Note this is a tick count, not a wall clock, and it wraps -- which is
+ * exactly why the age is computed in C by UTILS_AGE_S rather than by
+ * subtracting in the script.
+ */
+static int l_systime(lua_State *L) {
+	lua_pushinteger(L, (lua_Integer)chVTGetSystemTimeX());
+	return 1;
+}
+
+static int l_secs_since(lua_State *L) {
+	const lua_Integer t = luaL_checkinteger(L, 1);
+
+	lua_pushnumber(L, (lua_Number)UTILS_AGE_S((systime_t)t));
+	return 1;
+}
+
 /* ----------------------------------------------------------------- adc --- */
 
 /*
@@ -220,27 +247,66 @@ static int l_app_disable_output(lua_State *L) {
 }
 
 /*
- * Detach the ADC app's input from the motor, so a script can feed it instead.
+ * Detach the ADC app's inputs, so a script can feed them instead.
  *
- * 0 reattaches, 1 detaches the throttle, 2 detaches the buttons, 3 both --
- * lisp's numbering. app_adc_override then supplies the value the app would
- * have read.
+ * mode is a bitmask: 1 throttle, 2 buttons, 4 brake. 0 reattaches everything.
+ *
+ * The number this passes to app_adc_detach_adc is NOT the mask, because that
+ * function's values are not a mask either -- app_adc.c tests them as
+ * "adc_detached == 1 || == 2" for the throttle (:193) and
+ * "adc_detached == 1 || == 3" for the brake (:262), so 1 means BOTH channels,
+ * 2 throttle only and 3 brake only.
+ *
+ * This binding used to pass 1 whenever the throttle was detached, which also
+ * took over the brake channel -- and with no way to set adc2_override from
+ * Lua, the brake input was silently forced to 0 V for as long as the script
+ * ran. Detaching the throttle now asks for 2, and the brake is only taken
+ * over when it is actually requested.
  */
 static int l_app_adc_detach(lua_State *L) {
 	int mode = (int)luaL_checkinteger(L, 1);
 
-	luaL_argcheck(L, (mode >= 0) && (mode <= 3), 1,
-			"detach mode must be 0..3");
+	luaL_argcheck(L, (mode >= 0) && (mode <= 7), 1,
+			"detach mode must be 0..7 (1 throttle, 2 buttons, 4 brake)");
 
-	app_adc_detach_adc((mode & 1) != 0 ? 1 : 0);
+	const bool thr = (mode & 1) != 0;
+	const bool brk = (mode & 4) != 0;
+	int detach = 0;
+
+	if (thr && brk) {
+		detach = 1;
+	} else if (thr) {
+		detach = 2;
+	} else if (brk) {
+		detach = 3;
+	}
+
+	app_adc_detach_adc(detach);
 	app_adc_detach_buttons((mode & 2) != 0);
 	return 0;
 }
 
+/*
+ * The voltage the detached app reads instead of its pin, 0..3.3 V.
+ *
+ * target 0 is the throttle (ADC1) and 1 the brake (ADC2); the channel has to
+ * have been detached first or the value is ignored. Note that an override is
+ * a raw pin voltage, so the configured mapping, deadband, throttle curve and
+ * ramps all still run on top of it.
+ */
 static int l_app_adc_override(lua_State *L) {
 	float val = (float)luaL_checknumber(L, 1);
+	int target = (int)luaL_optinteger(L, 2, 0);
 
-	app_adc_adc1_override(val);
+	luaL_argcheck(L, (target == 0) || (target == 1), 2,
+			"target must be 0 (throttle) or 1 (brake)");
+
+	if (target == 0) {
+		app_adc_adc1_override(val);
+	} else {
+		app_adc_adc2_override(val);
+	}
+
 	return 0;
 }
 
@@ -273,6 +339,8 @@ static const luaL_Reg io_fns[] = {
 	{"app_adc_override", l_app_adc_override},
 	{"app_ppm_detach", l_app_ppm_detach},
 	{"app_ppm_override", l_app_ppm_override},
+	{"systime",          l_systime},
+	{"secs_since",       l_secs_since},
 
 	{NULL, NULL}
 };

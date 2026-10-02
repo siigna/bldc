@@ -154,13 +154,21 @@ function M.step(dt)
   return M.current
 end
 
--- The loop, skipped when a test has set BENCH_TEST so it can step M itself.
+-- Driven by the engine's timer, skipped when a test has set BENCH_TEST so it
+-- can step M itself.
+--
+-- This used to be a `while true` loop ending in vesc.sleep(), which does not
+-- exist: the Lua engine has no sleep and no clock of any kind, so on hardware
+-- that line was "attempt to call a nil value" the first time round. It went
+-- unnoticed because the only test path sets BENCH_TEST and never enters the
+-- loop. vesc.on_timer is the periodic entry point that does exist, and it
+-- also yields to the engine between passes rather than occupying it.
 if not BENCH_TEST then
-  -- Keep the apps off the output for as long as this runs, refreshed each
-  -- pass so the motor is released if the script dies.
   local last_report = ""
 
-  while true do
+  vesc.on_timer(cfg.period_ms, function()
+    -- Keep the apps off the output for as long as this runs, refreshed each
+    -- pass so the motor is released if the script dies.
     vesc.app_disable_output(cfg.period_ms * 5)
     M.step(cfg.period_ms / 1000.0)
 
@@ -168,9 +176,7 @@ if not BENCH_TEST then
       print(M.reason .. " (" .. string.format("%.2f", M.current) .. " A)")
       last_report = M.reason
     end
-
-    vesc.sleep(cfg.period_ms / 1000.0)
-  end
+  end)
 end
 
 return M

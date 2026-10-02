@@ -44,10 +44,13 @@ ENGINE_SRC = $(wildcard $(TOP)/script/lua/*.c) \
 BINDING_SRC = $(TOP)/script/lua_vesc_mc.c \
               $(TOP)/script/lua_vesc_conf.c \
               $(TOP)/script/lua_vesc_can.c
-# fake_io.c stands in for lua_vesc_io.c, which cannot be linked here: it
-# reaches the ChibiOS HAL through conf_general.h and these images have no HAL.
+# fake_io.c and fake_pas.c stand in for lua_vesc_io.c and lua_vesc_pas.c,
+# which cannot be linked here: they
+# reach the ChibiOS HAL through conf_general.h and app.h, and these images
+# have no HAL.
 # See the note in fake_io.c, and tests/lua_adc for what does cover it.
-BINDING_FAKES = fake/fake_mc.c fake/fake_conf.c fake/fake_can.c fake/fake_io.c
+BINDING_FAKES = fake/fake_mc.c fake/fake_conf.c fake/fake_can.c fake/fake_io.c \
+                fake/fake_pas.c
 BINDING_INC = $(TOP)/script $(TOP)/script/lua $(TOP)/util
 
 ifeq ($(TEST),test_engine)
@@ -128,7 +131,8 @@ ifeq ($(TEST),test_script)
   CSRC += $(ENGINE_SRC) \
           $(TOP)/script/lua_vesc_mc.c \
           fake/fake_mc.c \
-          fake/fake_io.c
+          fake/fake_io.c \
+          fake/fake_pas.c
   INCDIR := fake $(INCDIR) $(BINDING_INC) .
 endif
 

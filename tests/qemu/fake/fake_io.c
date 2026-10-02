@@ -18,6 +18,9 @@
 #include "lua_vesc_io.h"
 #include "fake_io.h"
 
+#include "ch.h"
+#include "utils.h"
+
 fake_io_t fake_io;
 
 void fake_io_reset(void) {
@@ -90,6 +93,24 @@ static int l_noop(lua_State *L) {
 	return 0;
 }
 
+/*
+ * The clock is real even here: the kernel in these images is the real one, so
+ * chVTGetSystemTimeX works and there is nothing to fake. It lives in this
+ * table because that is where the real binding lives, and a stand-in that
+ * does not mirror its table would let a script pass here and fail on a board.
+ */
+static int l_systime(lua_State *L) {
+	lua_pushinteger(L, (lua_Integer)chVTGetSystemTimeX());
+	return 1;
+}
+
+static int l_secs_since(lua_State *L) {
+	const lua_Integer t = luaL_checkinteger(L, 1);
+
+	lua_pushnumber(L, (lua_Number)UTILS_AGE_S((systime_t)t));
+	return 1;
+}
+
 static const luaL_Reg io_fns[] = {
 	{"get_adc", l_get_adc},
 	{"get_adc_decoded", l_get_adc_decoded},
@@ -102,6 +123,8 @@ static const luaL_Reg io_fns[] = {
 	{"app_adc_override", l_noop},
 	{"app_ppm_detach", l_noop},
 	{"app_ppm_override", l_noop},
+	{"systime",          l_systime},
+	{"secs_since",       l_secs_since},
 	{NULL, NULL}
 };
 
