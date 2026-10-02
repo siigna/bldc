@@ -2,6 +2,10 @@
 # Everything that can be checked without a board.
 #
 #   ./tests/check.sh            tests, sanitizers, static analysis, coverage
+#
+# Covers both lines of work: the PAS suites and the script engine's, including
+# the QEMU images. tests/run_all.sh, which the script-engine branch grew
+# separately, is gone -- this is the one entry point.
 #   ./tests/check.sh --fuzz     and a short fuzzing run
 #   ./tests/check.sh --tree     and cppcheck over the whole firmware
 #   FUZZ_SECS=600 ./tests/check.sh --fuzz    a longer one
@@ -28,13 +32,40 @@ stage "host tests, every board variant"
 make -C tests/app_pas run-all 2>&1 | grep -E "^---|checks,"
 report "${PIPESTATUS[0]}"
 
-for t in angles packet_recovery float_serialization overvoltage_fault; do
+# Every plain-C suite with its own Makefile. The script-engine ones joined when
+# that branch merged; adding a directory here is all a new suite needs.
+#
+# Built from clean first, deliberately. Without it a failed build leaves the
+# previous binary for the run step to test, which this tree has produced in
+# four different forms -- including a QEMU image that ran while its own build
+# was failing.
+for t in angles packet_recovery float_serialization overvoltage_fault \
+         script_pack script_queue script_alloc lua_adc utils_math; do
     if [ -f "tests/$t/Makefile" ]; then
         stage "host tests: $t"
-        make -C "tests/$t" run 2>&1 | tail -3
-        report $?
+        if ! make --no-print-directory -C "tests/$t" clean >/dev/null 2>&1 \
+             || ! out=$(make --no-print-directory -C "tests/$t" 2>&1); then
+            printf '%s\n' "$out" | tail -8
+            report 1
+            continue
+        fi
+        make --no-print-directory -C "tests/$t" run 2>&1 | tail -3
+        report "${PIPESTATUS[0]}"
     fi
 done
+
+# Suites that bring their own runner.
+stage "parameter table against the LispBM extensions"
+./tests/conf_table/run.sh
+report $?
+
+stage "script engine on a simulated STM32F405 (QEMU)"
+if command -v qemu-system-arm >/dev/null 2>&1; then
+    ./tests/qemu/run.sh 2>&1 | grep -E ": ok|FAILED|checks,"
+    report "${PIPESTATUS[0]}"
+else
+    echo "  skipped: no qemu-system-arm on PATH"
+fi
 
 stage "sanitizers (address, undefined)"
 make -C tests/app_pas run-san 2>&1 | grep -E "^---|checks,|runtime error|ERROR:"
