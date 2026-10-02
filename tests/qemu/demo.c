@@ -99,7 +99,7 @@ static THD_FUNCTION(engine, arg) {
 	chRegSetThreadName("lua");
 
 	say("");
-	say("  VESC firmware -- script engine: Lua  (USE_LISPBM=0 USE_LUA=1)");
+	say("  ESCargot firmware -- script engine: Lua  (USE_LISPBM=0 USE_LUA=1)");
 	say("  target: STM32F405, ChibiOS 3.0.5          [QEMU, not a board]");
 	say("");
 
