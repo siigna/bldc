@@ -78,6 +78,16 @@ ifeq ($(TEST),test_conf)
   INCDIR := fake $(INCDIR) $(TOP)/script $(TOP)/script/lua
 endif
 
+# demo is not a test: it prints a console session for showing what the engine
+# does. Same sources as test_script.
+ifeq ($(TEST),demo)
+  CSRC += $(ENGINE_SRC) \
+          $(TOP)/script/lua_vesc_mc.c \
+          fake/fake_mc.c \
+          fake/fake_io.c
+  INCDIR := fake $(INCDIR) $(BINDING_INC) .
+endif
+
 # test_script runs script/examples/bench_throttle.lua. The source is embedded
 # from the real file by the rule below, so the test cannot drift from what
 # gets uploaded. The io bindings here are the stand-ins in fake_io.c, not
@@ -185,6 +195,7 @@ bench_throttle.inc: $(TOP)/script/examples/bench_throttle.lua Makefile
 		rm -f $@; exit 1; }
 
 $(OBJDIR)/test_script.o: bench_throttle.inc
+$(OBJDIR)/demo.o: bench_throttle.inc
 
 $(OBJDIR)/%.o: %.c | $(OBJDIR)
 	@arm-none-eabi-gcc $(CFLAGS) -c -o $@ $<
