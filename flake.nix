@@ -64,6 +64,10 @@
             # which the build stops at gnu/stubs-32.h.
             gcc_multi
 
+            # proofs/: bounded model checking of the claims a few commit
+            # messages make. See proofs/README.md.
+            cbmc
+
             # gcc_multi rearranges library resolution enough that the
             # sanitizer runtimes stop finding libstdc++, which the three
             # script tests link through libubsan. Putting it back explicitly

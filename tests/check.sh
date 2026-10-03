@@ -85,6 +85,17 @@ report $?
 # of 62 KB. So a binding present in one and not the other means a package
 # written for one engine cannot be ported to the other, which is how the Lua
 # table came to be four bindings ahead of the Lisp one with nothing saying so.
+# Machine-checked claims, where a commit message asserted something a test can
+# only sample -- see proofs/README.md, including what a passing run does not
+# mean. Skipped rather than failed without CBMC, like the other tool stages.
+stage "proofs (bounded model checking)"
+if ! command -v cbmc >/dev/null 2>&1; then
+    printf '  skipped: no cbmc\n'
+else
+    ./proofs/run.sh 2>&1 | grep -E "^---|VERIFICATION|failed"
+    report "${PIPESTATUS[0]}"
+fi
+
 stage "pedal-assist bindings, Lisp against Lua"
 python3 ./tests/pas_parity/check.py
 report $?
