@@ -58,6 +58,18 @@
             # tests/utils_math is a gtest suite.
             gtest
 
+            # tests/uavcan_vesc_frames builds -m32: libcanard needs a 32-bit
+            # host, which is what upstream's Dockerfile for it exists to
+            # provide. gcc_multi carries the 32-bit glibc headers, without
+            # which the build stops at gnu/stubs-32.h.
+            gcc_multi
+
+            # gcc_multi rearranges library resolution enough that the
+            # sanitizer runtimes stop finding libstdc++, which the three
+            # script tests link through libubsan. Putting it back explicitly
+            # is cheaper than giving up the 32-bit build.
+            stdenv.cc.cc.lib
+
             python3
           ];
         };

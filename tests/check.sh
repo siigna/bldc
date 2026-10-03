@@ -39,8 +39,16 @@ report "${PIPESTATUS[0]}"
 # previous binary for the run step to test, which this tree has produced in
 # four different forms -- including a QEMU image that ran while its own build
 # was failing.
-for t in angles packet_recovery float_serialization overvoltage_fault \
-         script_pack script_queue script_alloc lua_adc utils_math; do
+# Discovered, not listed. The list used to be written out here, and when
+# upstream added tests/uavcan_vesc_frames the test came with the merge and was
+# never run -- a hardcoded list silently declines anything new, which is the
+# opposite of what you want from a fork that merges someone else's tests.
+#
+# Excluded are the suites that bring their own runner or are driven elsewhere
+# in this script: app_pas has run-all and run-san stages of its own, qemu and
+# conf_table have run.sh, confsig and pas_parity are python invoked directly.
+for t in $(ls -d tests/*/ 2>/dev/null | sed 's|tests/||; s|/||' \
+           | grep -vxE 'app_pas|qemu|conf_table|confsig|pas_parity'); do
     if [ -f "tests/$t/Makefile" ]; then
         stage "host tests: $t"
         if ! make --no-print-directory -C "tests/$t" clean >/dev/null 2>&1 \
@@ -50,6 +58,11 @@ for t in angles packet_recovery float_serialization overvoltage_fault \
             # carry, and reporting that as FAILED hides anything else.
             if printf '%s' "$out" | grep -q "gtest/gtest.h: No such file"; then
                 printf '  skipped: no gtest\n'
+            elif printf '%s' "$out" | grep -q "gnu/stubs-32.h: No such file"; then
+                # uavcan_vesc_frames builds -m32 because libcanard needs a
+                # 32-bit host. The dev shell carries gcc_multi for it; without
+                # multilib headers this is an absent dependency, not a defect.
+                printf '  skipped: no 32-bit headers (needs gcc_multi)\n'
                 continue
             fi
 
