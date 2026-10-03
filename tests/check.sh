@@ -68,11 +68,18 @@ stage "parameter table against the LispBM extensions"
 report $?
 
 stage "script engine on a simulated STM32F405 (QEMU)"
-if command -v qemu-system-arm >/dev/null 2>&1; then
+# Both halves are needed, and gating on only the emulator was a trap: with
+# qemu present and no cross compiler every image fails to build, and the
+# stage reports FAILED over a wall of "arm-none-eabi-gcc: No such file or
+# directory" rather than saying what is missing. Both come from the dev
+# shell; outside it, nix develop.
+if ! command -v qemu-system-arm >/dev/null 2>&1; then
+    echo "  skipped: no qemu-system-arm on PATH"
+elif ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+    echo "  skipped: no arm-none-eabi-gcc, so the images cannot be built"
+else
     ./tests/qemu/run.sh 2>&1 | grep -E ": ok|FAILED|checks,"
     report "${PIPESTATUS[0]}"
-else
-    echo "  skipped: no qemu-system-arm on PATH"
 fi
 
 stage "sanitizers (address, undefined)"
@@ -95,8 +102,19 @@ if ! command -v cppcheck >/dev/null 2>&1; then
     # stages were red in the dev shell for weeks.
     printf '  skipped: no cppcheck\n'
 else
+# --check-level=exhaustive, and not only for the extra thoroughness. At the
+# normal level cppcheck 2.18 emits an *informational* message about limiting
+# branch analysis, and --error-exitcode turns that advice into a red stage --
+# a tool telling you it did less work should not read the same as a tool
+# finding a bug. Exhaustive says nothing and takes 1.2 seconds here.
+#
+# These tools are version-sensitive, which is why the dev shell pins them.
+# Ubuntu's cppcheck 2.13 reports a constParameterPointer in
+# tests/app_pas/fixture.c that neither 2.18 nor 2.21 does, and 2.21 does not
+# emit the branch-limit message at all.
 cppcheck --enable=warning,style,performance,portability --inline-suppr \
     --suppress=missingIncludeSystem --error-exitcode=1 --std=c99 \
+    --check-level=exhaustive \
     -DNO_STM32 '-DHW_SOURCE="hw.h"' '-DHW_HEADER="hw.h"' \
     -Itests/app_pas -I. -Iutil -Iapplications -Imotor -Icomm \
     --quiet applications/app_pas.c tests/app_pas/*.c

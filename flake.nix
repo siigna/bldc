@@ -27,6 +27,40 @@
           inherit bldc-fw;
           default = bldc-fw;
         };
+
+        # `nix develop`, and what CI runs tests/check.sh inside.
+        #
+        # Without this, nix develop fell back to the firmware package's build
+        # environment: the ARM toolchain was there, but nothing else was, so
+        # four of check.sh's stages skipped on every local run -- the gtest
+        # host test, the QEMU suite, cppcheck and clang-tidy. A stage that
+        # skips locally and runs in CI is a stage you find out about from a
+        # red build.
+        #
+        # The analysis tools are pinned here deliberately, not incidentally.
+        # They are version-sensitive: Ubuntu's cppcheck 2.13 flags two sites
+        # in tests/app_pas/fixture.c that 2.21 does not, and its clang-tidy
+        # reports a va_list in that same file as uninitialized where clang 21
+        # does not. Pinning them is what makes "it passed locally" mean
+        # something about CI.
+        devShells.default = pkgs.mkShell {
+          inputsFrom = [ bldc-fw ];
+
+          packages = with pkgs; [
+            # tests/qemu runs the real kernel on a simulated STM32F405. It
+            # needs the ARM toolchain too, which comes from bldc-fw above.
+            qemu
+
+            # The analysis stages.
+            cppcheck
+            clang-tools
+
+            # tests/utils_math is a gtest suite.
+            gtest
+
+            python3
+          ];
+        };
       }
     )
     // {

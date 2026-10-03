@@ -15,29 +15,77 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cppcheck clang clang-tidy
+      # The tools come from the flake's dev shell rather than apt, so CI runs
+      # the same versions a developer does. That is not tidiness: the analysis
+      # stages are version-sensitive, and apt's cppcheck 2.13 failed this job
+      # on two findings in tests/app_pas/fixture.c that newer versions do not
+      # report at all. Pinning is what makes a local pass mean something.
+      #
+      # It also gets four stages running that apt could not: the gtest host
+      # test, and the QEMU suite, which needs both qemu-system-arm and the ARM
+      # cross compiler.
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            experimental-features = nix-command flakes
+
+      # Separate from the test step so a cache miss or a broken flake reads as
+      # its own failure rather than as a failing test.
+      - name: Build the dev shell
+        run: nix develop --command true
 
       # vesc_tool holds the parameter XML that the configuration signature is
-      # computed from. Without it that one stage skips rather than fails, so
-      # the checkout is allowed to fail on a fork that has no access.
+      # computed from, and a mismatch there means the firmware rejects every
+      # config this fork's Tool writes. Our fork, not upstream: the signature
+      # has to match the Tool we actually ship. Allowed to fail, because the
+      # stage skips rather than failing when the tree is absent.
       - name: Check out vesc_tool for the config comparison
         continue-on-error: true
         uses: actions/checkout@v4
         with:
-          repository: vedderb/vesc_tool
+          repository: siigna/vesc_tool
           path: vesc_tool_co
           sparse-checkout: res/config
 
-      - name: Put vesc_tool where check.sh looks for it
+      # tests/qemu/test_garmr cuts its script out of the package repository, so
+      # that it tests the file that ships rather than a copy that can drift.
+      # Without this checkout the image cannot be built and those 29 checks
+      # skip -- which is what they did, silently, until a container run showed
+      # it as a build failure.
+      - name: Check out vesc_pkg for the Garmr script
         continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: siigna/vesc_pkg
+          path: vesc_pkg_co
+          sparse-checkout: garmr
+
+      # Reported rather than silent. Both checkouts are allowed to fail, and
+      # the stages that need them skip rather than failing -- so without a
+      # line saying whether the tree arrived, a skipped stage is
+      # indistinguishable from one that was never going to run. That is how
+      # the signature comparison sat skipped: the checkout worked, but it was
+      # pointed at upstream, whose res/config has no 7.02.
+      - name: Put the sibling checkouts where the tests look for them
         run: |
-          [ -d vesc_tool_co ] && ln -s "$PWD/vesc_tool_co" ../vesc_tool || true
+          for repo in vesc_tool vesc_pkg; do
+              if [ -d "${repo}_co" ]; then
+                  ln -sfn "$PWD/${repo}_co" "../$repo"
+                  printf '  %s: linked\n' "$repo"
+              else
+                  printf '  %s: NOT checked out, so the stages needing it will skip\n' "$repo"
+              fi
+          done
+          [ -d ../vesc_tool/res/config/7.02 ] \
+              && echo "  vesc_tool: res/config/7.02 present" \
+              || echo "  vesc_tool: no res/config/7.02, signature stage will skip"
+          [ -f ../vesc_pkg/garmr/garmr.lua ] \
+              && echo "  vesc_pkg: garmr.lua present" \
+              || echo "  vesc_pkg: no garmr.lua, test_garmr will skip"
 
       - name: Run the checks
-        run: ./tests/check.sh
+        run: nix develop --command ./tests/check.sh
 
   fuzz:
     name: Fuzz the PAS app
