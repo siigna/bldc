@@ -18,6 +18,17 @@ repo = sys.argv[1]
 upstream_ref = sys.argv[2]
 ours = {"siigna", "Stephen Bouche", "Steve Bouché", "Steve Bouche"}
 
+# Contributors who commit under more than one git identity. Without this the
+# audit reports somebody as uncredited while their other name sits in the
+# header, which is noise that hides the real findings.
+ALIAS = {
+    "JFriesen": "Jeffrey M. Friesen",
+    "DovPearX": "DovPear",
+}
+
+# Blame attributes uncommitted lines to this; it is not a person.
+IGNORE = {"Not Committed Yet"}
+
 
 def sh(*args):
     return subprocess.run(args, cwd=repo, capture_output=True, text=True).stdout
@@ -42,6 +53,7 @@ for f in added:
     for line in porc.splitlines():
         if line.startswith("author "):
             author = line[len("author "):]
+            author = ALIAS.get(author, author)
         elif line.startswith("filename "):
             src = line[len("filename "):]
         elif line.startswith("\t"):
@@ -65,17 +77,26 @@ for f in added:
             counts[author] = counts.get(author, 0) + 1
             files.setdefault(author, set()).add(src)
 
-    foreign = {a: n for a, n in counts.items() if a not in ours}
+    foreign = {a: n for a, n in counts.items()
+               if a not in ours and a not in IGNORE}
 
     if not foreign:
         continue
 
     # What the file's own header says.
-    head = sh("git", "show", "HEAD:" + f)[:2000]
-    declared = set(re.findall(r"Copyright[^\n]*?([A-Z][a-zA-Z]+ [A-Z][a-zA-Z]+)", head))
+    #
+    # The decision is a substring test against the header text, not a parse of
+    # it. The first version extracted holders with a Firstname-Lastname regex
+    # and then asked whether the author was among them, which failed on
+    # "Jeffrey M. Friesen" -- a middle initial is not a surname -- and on
+    # "r3n33", which has no capital letter. Both were already credited and both
+    # were reported as missing, by the tool whose job is to not make that
+    # mistake. The regex survives only to show what a header says.
+    head = sh("git", "show", "HEAD:" + f)[:4000]
+    declared = [l.strip() for l in head.splitlines() if "Copyright" in l]
 
     missing = {a: n for a, n in foreign.items()
-               if not any(a.split()[-1] in d for d in declared)}
+               if a.split()[-1] not in head}
 
     missing = {a: n for a, n in missing.items() if n >= 3}
 
@@ -84,7 +105,11 @@ for f in added:
 
 for f, missing, files, declared in sorted(findings, key=lambda x: -sum(x[1].values())):
     print("%s" % f)
-    print("    header credits: %s" % (", ".join(declared) or "nobody"))
+    if declared:
+        for d in declared:
+            print("    declares: %s" % d)
+    else:
+        print("    declares: nothing")
     for a, n in sorted(missing.items(), key=lambda x: -x[1]):
         src = ", ".join(sorted(files[a])[:3])
         print("    %-26s %3d lines   from %s" % (a, n, src))
