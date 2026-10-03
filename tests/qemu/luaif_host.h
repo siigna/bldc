@@ -1,4 +1,21 @@
 /*
+	Copyright Benjamin Vedder
+	Copyright 2026 Stephen Bouche
+
+	Parts of this file were moved here from util/mempools.h, utils.h;
+	git blame -C records 3 lines as Benjamin Vedder's.
+
+	A stand-in for the firmware's util/mempools.h and utils.h, built only for the host
+	tests. It reproduces the declarations the code under test needs, so the
+	parts that come from upstream are upstream's -- a stub for a header cannot
+	avoid being one.
+
+	This file is part of the ESCargot firmware, a fork of the VESC firmware.
+
+	SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+/*
  * Stands in for the two board-specific things luaif.c needs: the flash the
  * script is read from, and the terminal its output goes to. Everything else
  * -- the kernel, the engine, the arena, the queue -- is the real code.

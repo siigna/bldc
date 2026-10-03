@@ -1,5 +1,9 @@
 /*
+	Copyright Benjamin Vedder
 	Copyright 2026 Stephen Bouche
+
+	Parts of this file were moved here from examples/esp32c3-packet/main/main.c, examples/esp32c3/main/main.c, lispBM/lispif.c;
+	git blame -C records 8 lines as Benjamin Vedder's.
 
 	This file is part of the ESCargot firmware.
 

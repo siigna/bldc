@@ -1,6 +1,10 @@
 /*
+	Copyright Marcos Chaparro
 	Copyright 2016 - 2022 Benjamin Vedder	benjamin@vedder.se
 	Copyright 2026 Stephen Bouche
+
+	Parts of this file were moved here from motor/mc_interface.c;
+	git blame -C records 3 lines as Marcos Chaparro's.
 
 	The input current limit arithmetic in this file was moved here from
 	mc_interface.c unchanged; it is Benjamin Vedder's work, with the input

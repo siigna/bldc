@@ -1,4 +1,22 @@
 /*
+	Copyright Benjamin Vedder
+	Copyright 2026 Samuel de Boer
+	Copyright 2026 Stephen Bouche
+
+	Parts of this file were moved here from comm_can.h;
+	git blame -C records 7 lines as Benjamin Vedder's.
+
+	A stand-in for the firmware's comm_can.h, built only for the host
+	tests. It reproduces the declarations the code under test needs, so the
+	parts that come from upstream are upstream's -- a stub for a header cannot
+	avoid being one.
+
+	This file is part of the ESCargot firmware, a fork of the VESC firmware.
+
+	SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+/*
  * Fake comm_can: settable status caches and recorded transmissions, so every
  * CAN binding can be checked against what it actually read or sent.
  *

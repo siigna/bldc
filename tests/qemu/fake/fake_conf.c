@@ -1,3 +1,21 @@
+/*
+	Copyright Benjamin Vedder
+	Copyright 2026 Lukáš Hrázký
+	Copyright 2026 Stephen Bouche
+
+	Parts of this file were moved here from applications/app.c, commands.c, mempools.c;
+	git blame -C records 5 lines as Benjamin Vedder's.
+
+	A stand-in for the firmware's applications/app.c and commands.c, built only for the host
+	tests. It reproduces the declarations the code under test needs, so the
+	parts that come from upstream are upstream's -- a stub for a header cannot
+	avoid being one.
+
+	This file is part of the ESCargot firmware, a fork of the VESC firmware.
+
+	SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 #include "app.h"
 #include "mempools.h"
 #include "commands.h"
