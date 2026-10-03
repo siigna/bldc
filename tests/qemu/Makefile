@@ -11,6 +11,8 @@
 TEST   ?= test_kernel
 
 TOP     = ../..
+# The package repo, for the prototype script test_garmr runs.
+PKG ?= $(TOP)/../vesc_pkg
 CHIBIOS = $(TOP)/ChibiOS_3.0.5
 
 include $(CHIBIOS)/os/rt/rt.mk
@@ -127,6 +129,19 @@ endif
 # from the real file by the rule below, so the test cannot drift from what
 # gets uploaded. The io bindings here are the stand-ins in fake_io.c, not
 # script/lua_vesc_io.c -- see the note in that file.
+# test_garmr runs the Garmr prototype's engage logic against the fakes: the
+# Schmitt trigger, the validity window, the debounce and the keepalive. The
+# control it drives lives in app_pas.c and is covered by tests/app_pas; what
+# is here is the decision about when to ask for it.
+ifeq ($(TEST),test_garmr)
+  CSRC += $(ENGINE_SRC) \
+          $(TOP)/script/lua_vesc_mc.c \
+          fake/fake_mc.c \
+          fake/fake_io.c \
+          fake/fake_pas.c
+  INCDIR := fake $(INCDIR) $(BINDING_INC) .
+endif
+
 ifeq ($(TEST),test_script)
   CSRC += $(ENGINE_SRC) \
           $(TOP)/script/lua_vesc_mc.c \
@@ -231,8 +246,17 @@ bench_throttle.inc: $(TOP)/script/examples/bench_throttle.lua Makefile
 	@grep -q 'M.step' $@ || { echo "bench_throttle.inc looks truncated"; \
 		rm -f $@; exit 1; }
 
+# The prototype lives in vesc_pkg, beside the package that ships it, so the
+# guard checks for something only the real file has.
+garmr.inc: $(PKG)/garmr/garmr.lua Makefile
+	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
+	@test -s $@ || { echo "garmr.inc is empty"; rm -f $@; exit 1; }
+	@grep -q 'pas_walk_set' $@ || { echo "garmr.inc looks truncated"; \
+		rm -f $@; exit 1; }
+
 $(OBJDIR)/test_script.o: bench_throttle.inc
 $(OBJDIR)/demo.o: bench_throttle.inc
+$(OBJDIR)/test_garmr.o: garmr.inc
 
 $(OBJDIR)/%.o: %.c | $(OBJDIR)
 	@arm-none-eabi-gcc $(CFLAGS) -c -o $@ $<
@@ -248,7 +272,7 @@ run: $(TEST).elf
 	@timeout 60 $(QEMU) $(QEMUFLAGS) -kernel $(TEST).elf
 
 clean:
-	rm -rf obj *.elf *.map bench_throttle.inc
+	rm -rf obj *.elf *.map bench_throttle.inc garmr.inc
 
 -include $(OBJ:.o=.d)
 

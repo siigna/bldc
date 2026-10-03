@@ -18,6 +18,19 @@
 cd "$(dirname "$0")"
 
 TESTS="test_kernel test_engine test_luaif test_bindings test_conf test_can test_script"
+
+# test_garmr cuts its script straight out of the package repository, so that
+# it tests the file that actually ships rather than a copy that can drift. The
+# cost is a dependency on a sibling checkout, and a bare clone of this repo
+# does not have one -- in which case the image cannot be built and the test is
+# skipped rather than reported as a build failure, which is what it did in CI.
+PKG="${PKG:-../../../vesc_pkg}"
+
+if [ -f "$PKG/garmr/garmr.lua" ]; then
+    TESTS="$TESTS test_garmr"
+else
+    echo "test_garmr: skipped (no $PKG/garmr/garmr.lua)"
+fi
 # The engine must be built with the limit the firmware uses, or the deep-
 # recursion checks would be testing a configuration nothing ships.
 ENGINE_FLAGS="-DLUAI_MAXCCALLS=16"
