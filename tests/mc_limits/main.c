@@ -178,6 +178,49 @@ int main(void) {
 	near("the draw ceiling survives the cutoff", r.in_max_base, 60.0f, 1e-3f);
 	near("but the usable draw does not", r.in_max, 0.0f, 1e-6f);
 
+	/* --- zero and near-zero input voltage ----------------------------- */
+
+	/*
+	 * The wattage limit divides by v_in, so a reading of zero makes it
+	 * infinite. utils_min_abs then discards it in favour of the battery
+	 * limit, which is the only reason this is safe -- an infinity surviving
+	 * into the output would mean no limit at all, which is the worst possible
+	 * direction for it to fail.
+	 *
+	 * Not hypothetical: before upstream seeded the input voltage filters at
+	 * init, consumers saw them converge from zero after boot, so this is a
+	 * state the limits really were asked about.
+	 */
+	c = base_conf();
+	c.l_watt_max = 1500.0f;
+	c.l_watt_min = -1500.0f;
+	r = at(c, 0.0f);
+	checks++;
+	if (isfinite(r.in_max) && isfinite(r.in_min)) {
+		printf("  ok   zero volts: both limits stay finite\n");
+	} else {
+		failures++;
+		printf("  FAIL zero volts: in_max=%g in_min=%g\n",
+				(double)r.in_max, (double)r.in_min);
+	}
+
+	/* And the cutoff still refuses to draw from a pack reading zero. */
+	near("zero volts: no draw", r.in_max, 0.0f, 1e-6f);
+
+	/*
+	 * Just above zero the wattage limit is a huge but finite current, and
+	 * must still lose to the battery limit rather than becoming the binding
+	 * one.
+	 */
+	r = at(c, 0.5f);
+	checks++;
+	if (isfinite(r.in_max) && fabsf(r.in_max) <= 60.0f) {
+		printf("  ok   half a volt: the watt limit does not become the limit\n");
+	} else {
+		failures++;
+		printf("  FAIL half a volt: in_max=%g\n", (double)r.in_max);
+	}
+
 	printf("\n%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

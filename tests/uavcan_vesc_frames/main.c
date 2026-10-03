@@ -269,6 +269,75 @@ static void test_esc_raw_command(void) {
 	CHECK(set_current_rel_last == 0.5f);
 }
 
+/*
+ * ---- added by this fork -------------------------------------------------
+ *
+ * shouldAcceptTransfer used to return true for any transfer type on a data
+ * type ID it recognised. Upstream narrowed each case to the one type it
+ * expects -- so a peer could previously deliver, say, a Response where a
+ * Request is handled, and reach a decoder that was not written for it. That
+ * change arrived without a test, and it is the kind that is easy to undo by
+ * accident while adding a case to the switch.
+ *
+ * Every ID is checked against all four transfer types: the expected one is
+ * accepted, the other three are refused. Table-driven so that a new ID with
+ * no entry here is visible as an ID nobody decided about.
+ */
+static void test_transfer_types_are_checked(void) {
+	static const struct {
+		const char *name;
+		uint16_t id;
+		CanardTransferType want;
+	} cases[] = {
+		{ "GetNodeInfo",          UAVCAN_PROTOCOL_GETNODEINFO_ID,              CanardTransferTypeRequest },
+		{ "ESC RawCommand",       UAVCAN_EQUIPMENT_ESC_RAWCOMMAND_ID,          CanardTransferTypeBroadcast },
+		{ "ESC RPMCommand",       UAVCAN_EQUIPMENT_ESC_RPMCOMMAND_ID,          CanardTransferTypeBroadcast },
+		{ "ESC Status",           UAVCAN_EQUIPMENT_ESC_STATUS_ID,              CanardTransferTypeBroadcast },
+		{ "RestartNode",          UAVCAN_PROTOCOL_RESTARTNODE_ID,              CanardTransferTypeRequest },
+		{ "Param GetSet",         UAVCAN_PROTOCOL_PARAM_GETSET_ID,             CanardTransferTypeRequest },
+		{ "File Read",            UAVCAN_PROTOCOL_FILE_READ_ID,                CanardTransferTypeResponse },
+		{ "BeginFirmwareUpdate",  UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE_ID, CanardTransferTypeRequest },
+	};
+
+	static const CanardTransferType all[] = {
+		CanardTransferTypeResponse,
+		CanardTransferTypeRequest,
+		CanardTransferTypeBroadcast,
+	};
+
+	for (size_t i = 0; i < (sizeof(cases) / sizeof(cases[0])); i++) {
+		for (size_t j = 0; j < (sizeof(all) / sizeof(all[0])); j++) {
+			uint64_t sig = 0;
+			const bool got = shouldAcceptTransfer(NULL, &sig, cases[i].id,
+					all[j], REMOTE_NODE_ID);
+			const bool want = (all[j] == cases[i].want);
+
+			if (got != want) {
+				printf("FAIL %s: transfer type %d %s\n", cases[i].name,
+						(int)all[j], want ? "was refused" : "was accepted");
+				failures++;
+			}
+		}
+
+		/*
+		 * The signature has to be set for the type that is accepted. libcanard
+		 * uses it to validate the transfer, and leaving it at zero would make
+		 * a recognised ID fail later and less clearly.
+		 */
+		uint64_t sig = 0;
+		(void)shouldAcceptTransfer(NULL, &sig, cases[i].id, cases[i].want,
+				REMOTE_NODE_ID);
+		CHECK(sig != 0);
+	}
+
+	/* An ID nothing handles is refused whatever it arrives as. */
+	for (size_t j = 0; j < (sizeof(all) / sizeof(all[0])); j++) {
+		uint64_t sig = 0;
+		CHECK(shouldAcceptTransfer(NULL, &sig, 0xFFFE, all[j],
+				REMOTE_NODE_ID) == false);
+	}
+}
+
 int main(void) {
 	test_not_ready();
 	test_vesc_frames_pass_through();
@@ -276,6 +345,7 @@ int main(void) {
 	test_get_node_info();
 	test_begin_firmware_update();
 	test_esc_raw_command();
+	test_transfer_types_are_checked();
 
 	CHECK(canard_mtx.locked == 0);
 
