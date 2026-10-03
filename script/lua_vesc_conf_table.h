@@ -102,7 +102,9 @@
 	X(l_current_min_scale, CONF_PLAIN, l_current_min_scale) \
 	X(l_erpm_start, CONF_PLAIN, l_erpm_start) \
 	X(l_in_current_max, CONF_PLAIN, l_in_current_max) \
+	X(l_in_current_max_scale, CONF_PLAIN, l_in_current_max_scale) \
 	X(l_in_current_min, CONF_NEG_ABS, l_in_current_min) \
+	X(l_in_current_min_scale, CONF_PLAIN, l_in_current_min_scale) \
 	X(l_max_duty, CONF_PLAIN, l_max_duty) \
 	X(l_max_erpm, CONF_PLAIN, l_max_erpm) \
 	X(l_max_vin, CONF_PLAIN, l_max_vin) \
@@ -193,7 +195,7 @@
 	X(vr_use_smart_rev, CONF_APPLY, app_chuk_conf.use_smart_rev) \
 	/* end */
 
-#define CONF_MC_PARAM_COUNT 88
+#define CONF_MC_PARAM_COUNT 90
 #define CONF_APP_PARAM_COUNT 58
 
 // clang-format on
