@@ -4,6 +4,7 @@ CSRC += \
 	util/digital_filter.c \
 	util/mempools.c \
 	util/utils_math.c \
+	util/mc_limits.c \
 	util/utils_sys.c \
 	util/worker.c \
 	util/lzo/minilzo.c

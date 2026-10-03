@@ -28,6 +28,7 @@
 #include "hw.h"
 #include "terminal.h"
 #include "utils_math.h"
+#include "mc_limits.h"
 #include "utils_sys.h"
 #include "ch.h"
 #include "hal.h"
@@ -2477,38 +2478,19 @@ static void update_override_limits(volatile motor_if_state_t *motor, volatile mc
 	}
 
 	// Input current limits
+	//
+	// The arithmetic lives in util/mc_limits.c so that it can be tested: this
+	// function is static, and the file around it reaches the ADC macros, the
+	// FOC state and the board headers, none of which that part of it used.
+	// Behaviour is unchanged -- the block was moved, not rewritten.
+	mc_in_limits_t in_lim;
+	mc_limits_input_current(conf, v_in, &in_lim);
 
-	const float l_in_current_min_tmp = conf->l_in_current_min * conf->l_in_current_min_scale;
-	const float l_in_current_max_tmp = conf->l_in_current_max * conf->l_in_current_max_scale;
+	const float l_in_current_min_tmp = in_lim.in_min_base;
+	const float l_in_current_max_tmp = in_lim.in_max_base;
 
-	// Battery cutoff
-	float lo_in_max_batt = 0.0;
-	if (v_in > (conf->l_battery_cut_start - 0.1)) {
-		lo_in_max_batt = l_in_current_max_tmp;
-	} else if (v_in < (conf->l_battery_cut_end + 0.1)) {
-		lo_in_max_batt = 0.0;
-	} else {
-		lo_in_max_batt = utils_map(v_in, conf->l_battery_cut_start,
-				conf->l_battery_cut_end, l_in_current_max_tmp, 0.0);
-	}
-
-	// Regen overvoltage cutoff
-	float lo_in_min_batt = 0.0;
-	if (v_in < (conf->l_battery_regen_cut_start + 0.1)) {
-		lo_in_min_batt = l_in_current_min_tmp;
-	} else if (v_in > (conf->l_battery_regen_cut_end - 0.1)) {
-		lo_in_min_batt = 0.0;
-	} else {
-		lo_in_min_batt = utils_map(v_in, conf->l_battery_regen_cut_start,
-				conf->l_battery_regen_cut_end, l_in_current_min_tmp, 0.0);
-	}
-
-	// Wattage limits
-	const float lo_in_max_watt = conf->l_watt_max / v_in;
-	const float lo_in_min_watt = conf->l_watt_min / v_in;
-
-	float lo_in_max = utils_min_abs(lo_in_max_watt, lo_in_max_batt);
-	float lo_in_min = utils_min_abs(lo_in_min_watt, lo_in_min_batt);
+	float lo_in_max = in_lim.in_max;
+	float lo_in_min = in_lim.in_min;
 
 	// BMS limits
 	bms_update_limits(&lo_in_min,  &lo_in_max, l_in_current_min_tmp, l_in_current_max_tmp);
