@@ -5,6 +5,7 @@ CSRC += \
 	util/mempools.c \
 	util/utils_math.c \
 	util/mc_limits.c \
+	util/imu_freeze.c \
 	util/utils_sys.c \
 	util/worker.c \
 	util/lzo/minilzo.c
