@@ -29,7 +29,17 @@ PKG="${PKG:-../../../vesc_pkg}"
 if [ -f "$PKG/garmr_lua/garmr.lua" ]; then
     TESTS="$TESTS test_garmr"
 else
-    echo "test_garmr: skipped (no $PKG/garmr/garmr.lua)"
+    echo "test_garmr: skipped (no $PKG/garmr_lua/garmr.lua)"
+fi
+
+# The LispBM Garmr, which is the version most bikes can run -- an F405 carries
+# one script engine, not both. Its checks are written in lisp and also run in
+# the vesc_express repl; this image is how they run without it, which is what
+# gets them into CI.
+if [ -f "$PKG/garmr/garmr.lisp" ]; then
+    TESTS="$TESTS test_garmr_lisp"
+else
+    echo "test_garmr_lisp: skipped (no $PKG/garmr/garmr.lisp)"
 fi
 # The engine must be built with the limit the firmware uses, or the deep-
 # recursion checks would be testing a configuration nothing ships.

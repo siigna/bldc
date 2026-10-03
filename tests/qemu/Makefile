@@ -86,7 +86,7 @@ endif
 # demo_lisp is the LispBM counterpart to demo. LispBM ships its own ChibiOS
 # platform layer, so its core links into this kernel-only image the same way
 # the Lua core does -- no HAL, no flash driver.
-ifeq ($(TEST),demo_lisp)
+ifneq ($(filter $(TEST),demo_lisp test_garmr_lisp),)
   # No -ffreestanding here. It makes newlib's inttypes.h withhold PRIu64 and
   # PRId64, which lispBM/src/print.c uses -- the firmware does not pass it
   # either, so this matches how LispBM is really built.
@@ -256,6 +256,26 @@ garmr.inc: $(PKG)/garmr_lua/garmr.lua Makefile
 	@grep -q 'pas_walk_set' $@ || { echo "garmr.inc looks truncated"; \
 		rm -f $@; exit 1; }
 
+# The LispBM Garmr: the script, its stubs and its checks, all three cut from
+# the package tree rather than copied. Same reasoning as garmr.inc above --
+# the test runs what ships.
+garmr_lisp.inc: $(PKG)/garmr/garmr.lisp Makefile
+	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
+	@grep -q 'app-pas-walk-set' $@ || { echo "garmr_lisp.inc looks truncated"; \
+		rm -f $@; exit 1; }
+
+garmr_stubs.inc: $(PKG)/garmr/test/stubs.lisp Makefile
+	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
+	@grep -q 'garmr-test' $@ || { echo "garmr_stubs.inc looks truncated"; \
+		rm -f $@; exit 1; }
+
+garmr_test.inc: $(PKG)/garmr/test/engage_test.lisp Makefile
+	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
+	@grep -q 'checks, ' $@ || { echo "garmr_test.inc looks truncated"; \
+		rm -f $@; exit 1; }
+
+$(OBJDIR)/test_garmr_lisp.o: garmr_lisp.inc garmr_stubs.inc garmr_test.inc
+
 $(OBJDIR)/test_script.o: bench_throttle.inc
 $(OBJDIR)/demo.o: bench_throttle.inc
 $(OBJDIR)/test_garmr.o: garmr.inc
@@ -274,7 +294,8 @@ run: $(TEST).elf
 	@timeout 60 $(QEMU) $(QEMUFLAGS) -kernel $(TEST).elf
 
 clean:
-	rm -rf obj *.elf *.map bench_throttle.inc garmr.inc
+	rm -rf obj *.elf *.map bench_throttle.inc garmr.inc \
+		garmr_lisp.inc garmr_stubs.inc garmr_test.inc
 
 -include $(OBJ:.o=.d)
 
