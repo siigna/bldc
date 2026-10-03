@@ -59,7 +59,7 @@ jobs:
         with:
           repository: siigna/vesc_pkg
           path: vesc_pkg_co
-          sparse-checkout: garmr
+          sparse-checkout: garmr_lua
 
       # Reported rather than silent. Both checkouts are allowed to fail, and
       # the stages that need them skip rather than failing -- so without a

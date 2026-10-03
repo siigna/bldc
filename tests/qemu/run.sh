@@ -26,7 +26,7 @@ TESTS="test_kernel test_engine test_luaif test_bindings test_conf test_can test_
 # skipped rather than reported as a build failure, which is what it did in CI.
 PKG="${PKG:-../../../vesc_pkg}"
 
-if [ -f "$PKG/garmr/garmr.lua" ]; then
+if [ -f "$PKG/garmr_lua/garmr.lua" ]; then
     TESTS="$TESTS test_garmr"
 else
     echo "test_garmr: skipped (no $PKG/garmr/garmr.lua)"

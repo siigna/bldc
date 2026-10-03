@@ -1943,6 +1943,26 @@ static lbm_value ext_app_pas_get_torque(lbm_value *args, lbm_uint argn) {
 	return lbm_enc_float(app_pas_get_torque_nm());
 }
 
+/*
+ * The rider's torque as a fraction of what the sensor can report, so a script
+ * can tell "pedalling gently" from "the sensor is pegged" -- which the torque
+ * in newton-metres cannot, since its ceiling depends on the sensor fitted.
+ */
+static lbm_value ext_app_pas_get_torque_ratio(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_torque_ratio());
+}
+
+/*
+ * True while the torque sensor is reading at its limit. Assist derived from a
+ * saturated reading stops responding to the rider, so this is how a script
+ * knows its input has stopped meaning anything.
+ */
+static lbm_value ext_app_pas_torque_saturated(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return app_pas_torque_saturated() ? ENC_SYM_TRUE : ENC_SYM_NIL;
+}
+
 static lbm_value ext_app_pas_get_rider_power(lbm_value *args, lbm_uint argn) {
 	(void)args; (void)argn;
 	return lbm_enc_float(app_pas_get_rider_power());
@@ -1956,6 +1976,27 @@ static lbm_value ext_app_pas_get_assist_power(lbm_value *args, lbm_uint argn) {
 static lbm_value ext_app_pas_get_measured_power(lbm_value *args, lbm_uint argn) {
 	(void)args; (void)argn;
 	return lbm_enc_float(app_pas_get_measured_power());
+}
+
+/*
+ * The power the assist is computed from, before the speed taper and the power
+ * cap. Paired with app-pas-get-assist-power, which is after them, it shows
+ * which limit is doing the limiting -- the difference is otherwise invisible
+ * from a script.
+ */
+static lbm_value ext_app_pas_get_assist_basis_power(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_assist_basis_power());
+}
+
+/*
+ * The speed taper's current multiplier, 1.0 below the taper start and 0.0 at
+ * the end. The one number that says "the assist is fading because of speed"
+ * rather than leaving a script to infer it from a drop in output.
+ */
+static lbm_value ext_app_pas_get_speed_taper(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	return lbm_enc_float(app_pas_get_speed_taper());
 }
 
 static lbm_value ext_app_pas_get_output(lbm_value *args, lbm_uint argn) {
@@ -6777,6 +6818,10 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("app-is-output-disabled", ext_app_is_output_disabled);
 		lbm_add_extension("app-pas-get-rpm", ext_app_pas_get_rpm);
 		lbm_add_extension("app-pas-get-torque", ext_app_pas_get_torque);
+		lbm_add_extension("app-pas-get-torque-ratio", ext_app_pas_get_torque_ratio);
+		lbm_add_extension("app-pas-torque-saturated", ext_app_pas_torque_saturated);
+		lbm_add_extension("app-pas-get-assist-basis-power", ext_app_pas_get_assist_basis_power);
+		lbm_add_extension("app-pas-get-speed-taper", ext_app_pas_get_speed_taper);
 		lbm_add_extension("app-pas-get-rider-power", ext_app_pas_get_rider_power);
 		lbm_add_extension("app-pas-get-assist-power", ext_app_pas_get_assist_power);
 		lbm_add_extension("app-pas-get-measured-power", ext_app_pas_get_measured_power);

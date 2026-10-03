@@ -247,8 +247,10 @@ bench_throttle.inc: $(TOP)/script/examples/bench_throttle.lua Makefile
 		rm -f $@; exit 1; }
 
 # The prototype lives in vesc_pkg, beside the package that ships it, so the
-# guard checks for something only the real file has.
-garmr.inc: $(PKG)/garmr/garmr.lua Makefile
+# guard checks for something only the real file has. garmr_lua, not garmr:
+# that repo follows the convention where the base name is the lisp package
+# and _lua is the Lua variant, and the lisp Garmr has its own test in the repl.
+garmr.inc: $(PKG)/garmr_lua/garmr.lua Makefile
 	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
 	@test -s $@ || { echo "garmr.inc is empty"; rm -f $@; exit 1; }
 	@grep -q 'pas_walk_set' $@ || { echo "garmr.inc looks truncated"; \

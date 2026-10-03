@@ -67,6 +67,15 @@ stage "parameter table against the LispBM extensions"
 ./tests/conf_table/run.sh
 report $?
 
+# The two engines are separate hand-maintained binding tables, and on an F405
+# a firmware can carry only one of them -- LispBM alone leaves .ram4 at 99.6%
+# of 62 KB. So a binding present in one and not the other means a package
+# written for one engine cannot be ported to the other, which is how the Lua
+# table came to be four bindings ahead of the Lisp one with nothing saying so.
+stage "pedal-assist bindings, Lisp against Lua"
+python3 ./tests/pas_parity/check.py
+report $?
+
 stage "script engine on a simulated STM32F405 (QEMU)"
 # Both halves are needed, and gating on only the emulator was a trap: with
 # qemu present and no cross compiler every image fails to build, and the
