@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # For the provenance audit's full sweep; see that job. An odd minute on
+  # purpose, so this is not one more thing landing on the hour.
+  schedule:
+    - cron: "43 4 * * 1"
 
 permissions:
   contents: read
@@ -86,6 +90,51 @@ jobs:
 
       - name: Run the checks
         run: nix develop --command ./tests/check.sh
+
+  # Who actually wrote the content of the files this fork adds. Every time
+  # something has been lifted out of an upstream file to make it testable or
+  # shareable, the new file has been created with this fork's header and only
+  # this fork's name -- twenty-four times before anyone looked. This is the
+  # check that stops that happening to a contribution.
+  #
+  # On a pull request it audits only the files that PR touches, which takes
+  # seconds; on the weekly run it audits everything, which takes minutes.
+  provenance:
+    name: provenance of added files
+    runs-on: ubuntu-latest
+    # Not on push. A full sweep is minutes, and on a branch nobody is
+    # reviewing it buys nothing that the weekly run does not.
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      # blame -C follows lines copied between files, so it needs the history.
+      # A shallow clone makes every line look like it originated here.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream to compare against
+        run: |
+          set -e
+          url=https://github.com/vedderb/bldc
+          git remote add upstream "$url" 2>/dev/null \
+              || git remote set-url upstream "$url"
+          git fetch --no-tags --quiet upstream master
+
+      - name: Audit
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+              git fetch --no-tags --quiet origin "$GITHUB_BASE_REF"
+              mapfile -t files < <(git diff --name-only \
+                  "origin/$GITHUB_BASE_REF...HEAD")
+              printf '%s file(s) changed by this pull request\n' "${#files[@]}"
+              python3 tests/provenance/audit.py . upstream/master "${files[@]}"
+          else
+              python3 tests/provenance/audit.py . upstream/master
+          fi
 
   fuzz:
     name: Fuzz the PAS app

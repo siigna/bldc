@@ -16,6 +16,12 @@ import sys
 
 repo = sys.argv[1]
 upstream_ref = sys.argv[2]
+
+# Optional: restrict to these paths. On a pull request only the files it
+# touches are worth auditing, and that turns several minutes into a few
+# seconds -- which is the difference between a check that runs on every
+# contribution and one that runs weekly and catches things late.
+only = set(sys.argv[3:])
 ours = {"siigna", "Stephen Bouche", "Steve Bouché", "Steve Bouche"}
 
 # Contributors who commit under more than one git identity. Without this the
@@ -37,6 +43,13 @@ def sh(*args):
 added = [f for f in sh("git", "diff", "--name-only", "--diff-filter=A",
                        upstream_ref + "...HEAD").splitlines()
          if re.search(r"\.(c|h|cpp|hpp|pri|py|lisp|lua)$", f)]
+
+if only:
+    added = [f for f in added if f in only]
+
+    if not added:
+        print("no added source files among the paths given; nothing to audit")
+        sys.exit(0)
 
 findings = []
 
@@ -116,3 +129,7 @@ for f, missing, files, declared in sorted(findings, key=lambda x: -sum(x[1].valu
     print()
 
 print("%d file(s) with uncredited content" % len(findings))
+
+# Non-zero on findings, so this can gate a pull request. A reviewer should see
+# it as a failure to fix, not a line in a log.
+sys.exit(1 if findings else 0)
