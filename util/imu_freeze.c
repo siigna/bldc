@@ -1,7 +1,13 @@
 /*
+	Copyright 2026 Lukas Hrazky
 	Copyright 2026 Stephen Bouche
 
-	This file is part of the ESCargot firmware.
+	The detector logic in this file was moved here from imu_thread.c
+	unchanged; it is Lukas Hrazky's work. What is new here is the function
+	boundary, the struct that replaces two file statics, and the comments.
+
+	This file is part of the ESCargot firmware, a fork of the
+	VESC firmware.
 
 	The ESCargot firmware is free software: you can redistribute it and/or
 	modify it under the terms of the GNU General Public License as published

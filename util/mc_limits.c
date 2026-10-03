@@ -1,7 +1,14 @@
 /*
+	Copyright 2016 - 2022 Benjamin Vedder	benjamin@vedder.se
 	Copyright 2026 Stephen Bouche
 
-	This file is part of the ESCargot firmware.
+	The input current limit arithmetic in this file was moved here from
+	mc_interface.c unchanged; it is Benjamin Vedder's work, with the input
+	current scale factors added upstream after that. What is new here is the
+	function boundary, the struct and the comments.
+
+	This file is part of the ESCargot firmware, a fork of the
+	VESC firmware.
 
 	The ESCargot firmware is free software: you can redistribute it and/or
 	modify it under the terms of the GNU General Public License as published

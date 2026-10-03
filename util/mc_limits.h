@@ -1,7 +1,9 @@
 /*
+	Copyright 2016 - 2022 Benjamin Vedder	benjamin@vedder.se
 	Copyright 2026 Stephen Bouche
 
-	This file is part of the ESCargot firmware.
+	This file is part of the ESCargot firmware, a fork of the
+	VESC firmware.
 
 	The ESCargot firmware is free software: you can redistribute it and/or
 	modify it under the terms of the GNU General Public License as published
