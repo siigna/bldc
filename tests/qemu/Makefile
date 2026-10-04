@@ -10,6 +10,12 @@
 
 TEST   ?= test_kernel
 
+# Named once: the FLAGKEY probe below and the compile and link rules
+# must agree about which compiler this is, or the key describes a
+# toolchain the objects were not built with.
+CC_ARM   ?= arm-none-eabi-gcc
+SIZE_ARM ?= arm-none-eabi-size
+
 TOP     = ../..
 # The package repo, for the prototype script test_garmr runs.
 PKG ?= $(TOP)/../vesc_pkg
@@ -222,8 +228,32 @@ LDFLAGS = $(ARCH) -nostartfiles -specs=nosys.specs -T$(LDSCRIPT) \
 # value -- a sweep over a -D parameter then reports the first build's number
 # for every point in the sweep, which looks like a flat result rather than a
 # broken one.
-FLAGKEY := $(shell printf '%s' "$(CFLAGS_EXTRA)" | cksum | cut -d' ' -f1)
+# The compiler is part of the key, not just the flags.
+#
+# Objects built by a different arm-none-eabi-gcc link against the current one
+# without a word of complaint and then fail checks that pass from clean --
+# which is what happened to test_luaif: run.sh reuses objects (it removes only
+# the elf, which forces a relink and never a recompile), the toolchain had
+# moved under them, and the result was 2 of 61 checks failing in the suite
+# while 12 consecutive standalone runs from clean passed.
+#
+# -dumpversion rather than --version: the latter carries a store path, so on
+# NixOS every rebuild of an identically-versioned toolchain would invalidate
+# the objects for nothing.
+CCID := $(shell $(CC_ARM) -dumpversion 2>/dev/null || echo unknown)
+FLAGKEY := $(shell printf '%s' "$(CFLAGS_EXTRA)|$(CCID)" | cksum | cut -d' ' -f1)
 OBJDIR  = obj/$(TEST)-$(FLAGKEY)
+
+# Which key the current $(TEST).elf was linked from.
+#
+# OBJDIR being keyed is not enough on its own: switching flags back to a value
+# used before finds that key's objects already present and older than the elf,
+# so make reports "Nothing to be done" and leaves an elf built from the other
+# key's objects in place. Rewriting this stamp whenever the key changes makes
+# the elf older than one of its prerequisites, which forces the relink.
+ELFKEY := .$(TEST).key
+$(shell [ "$$(cat $(ELFKEY) 2>/dev/null)" = "$(FLAGKEY)" ] \
+        || printf '%s' '$(FLAGKEY)' > $(ELFKEY))
 OBJ    = $(addprefix $(OBJDIR)/,$(notdir $(CSRC:.c=.o)) $(notdir $(ASMSRC:.s=.o)))
 VPATH  = $(sort $(dir $(CSRC) $(ASMSRC)))
 
@@ -281,20 +311,25 @@ $(OBJDIR)/demo.o: bench_throttle.inc
 $(OBJDIR)/test_garmr.o: garmr.inc
 
 $(OBJDIR)/%.o: %.c | $(OBJDIR)
-	@arm-none-eabi-gcc $(CFLAGS) -c -o $@ $<
+	@$(CC_ARM) $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/%.o: %.s | $(OBJDIR)
-	@arm-none-eabi-gcc $(AFLAGS) -c -o $@ $<
+	@$(CC_ARM) $(AFLAGS) -c -o $@ $<
 
-$(TEST).elf: $(OBJ)
-	@arm-none-eabi-gcc $(LDFLAGS) -o $@ $(OBJ) -lm
-	@arm-none-eabi-size $@
+$(TEST).elf: $(OBJ) $(ELFKEY)
+	@$(CC_ARM) $(LDFLAGS) -o $@ $(OBJ) -lm
+	@$(SIZE_ARM) $@
 
 run: $(TEST).elf
 	@timeout 60 $(QEMU) $(QEMUFLAGS) -kernel $(TEST).elf
 
+# What a variable expands to: `make print-OBJDIR TEST=test_luaif`. Added
+# because the stale-object bug above was pinned down by asking exactly this,
+# and `make -p` is no help -- it prints the unexpanded recursive definition.
+print-%: ; @echo '$*=$($*)'
+
 clean:
-	rm -rf obj *.elf *.map bench_throttle.inc garmr.inc \
+	rm -rf obj *.elf *.map .*.key bench_throttle.inc garmr.inc \
 		garmr_lisp.inc garmr_stubs.inc garmr_test.inc
 
 -include $(OBJ:.o=.d)
