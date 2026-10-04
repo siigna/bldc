@@ -58,6 +58,7 @@ for t in $(ls -d tests/*/ 2>/dev/null | sed 's|tests/||; s|/||' \
             # carry, and reporting that as FAILED hides anything else.
             if printf '%s' "$out" | grep -q "gtest/gtest.h: No such file"; then
                 printf '  skipped: no gtest\n'
+                continue
             elif printf '%s' "$out" | grep -q "gnu/stubs-32.h: No such file"; then
                 # uavcan_vesc_frames builds -m32 because libcanard needs a
                 # 32-bit host. The dev shell carries gcc_multi for it; without
@@ -70,7 +71,31 @@ for t in $(ls -d tests/*/ 2>/dev/null | sed 's|tests/||; s|/||' \
             report 1
             continue
         fi
-        make --no-print-directory -C "tests/$t" run 2>&1 | tail -3
+        # Which target runs it. Twelve of these use `run`; tests/vescsim uses
+        # `check`, and before this the loop called `run` unconditionally and
+        # reported "No rule to make target 'run'" as a test failure -- so a
+        # suite that had never once been executed looked like a regression.
+        #
+        # A suite with neither target is one that builds and never runs, which
+        # has to be loud: the point of discovering these rather than listing
+        # them is that a new suite cannot be silently declined, and silently
+        # not running one is the same defect wearing a different hat.
+        target=
+        for cand in run check; do
+            if make --no-print-directory -C "tests/$t" -n "$cand" \
+                    >/dev/null 2>&1; then
+                target=$cand
+                break
+            fi
+        done
+
+        if [ -z "$target" ]; then
+            printf '  neither a run nor a check target in tests/%s/Makefile\n' "$t"
+            report 1
+            continue
+        fi
+
+        make --no-print-directory -C "tests/$t" "$target" 2>&1 | tail -3
         report "${PIPESTATUS[0]}"
     fi
 done
